@@ -30,7 +30,6 @@ class StowageEnv(gym.Env):
         self.screen_width = 600
         self.screen_height = 400
         self.screen = None
-        self.clock = None
         self.isopen = True
 
         if config is None:
@@ -200,33 +199,156 @@ class StowageEnv(gym.Env):
         return state
 
     def _get_valid_yard_actions(self) -> np.ndarray:
-        occupied_mask = self.yard_state[:, StateIds.IS_OCCUPIED.value] == 0
+        occupied_mask = self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1
         if self.container_type == "one":
             bay_mask = self.yard_state[:, StateIds.BAY.value] % 2 == 1
             valid_actions = np.where(occupied_mask & bay_mask)[0]
         return valid_actions
 
     def render(self):
-        pass
+        """Render the environment as an RGB array"""
+        if self.render_mode != "rgb_array":
+            return None
+
+        try:
+            import os
+
+            os.environ["SDL_VIDEODRIVER"] = "dummy"
+            import pygame
+        except ImportError:
+            raise ImportError("pygame is not installed")
+
+        # Initialize pygame and surface
+        if not pygame.get_init():
+            pygame.init()
+        if self.screen is None:
+            self.screen = pygame.Surface((self.screen_width, self.screen_height))
+
+        # Clear screen
+        self.screen.fill((255, 255, 255))
+
+        # Layout parameters
+        padding, title_height, section_gap = 10, 20, 30
+        vessel_height = (self.screen_height - 3 * padding - 2 * title_height) * 0.4
+        yard_height = (self.screen_height - 3 * padding - 2 * title_height) * 0.6
+
+        # Draw section titles
+        font = pygame.font.Font(None, 24)
+        self.screen.blit(font.render("Vessel", True, (0, 0, 0)), (padding, padding))
+        self.screen.blit(font.render("Yard", True, (0, 0, 0)), (padding, padding + vessel_height + section_gap))
+
+        # Draw vessel and yard
+        self._draw_grid(
+            self.vessel_state,
+            padding + title_height,
+            vessel_height,
+            self.vessel_shape[0],
+            self.vessel_shape[1],
+            self.vessel_shape[2],
+            True,
+        )
+
+        self._draw_grid(
+            self.yard_state,
+            padding + title_height + vessel_height + section_gap,
+            yard_height,
+            self.yard_shape[0],
+            self.yard_shape[1],
+            self.yard_shape[2],
+            False,
+        )
+
+        # Return RGB array
+        return np.transpose(np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2))
+
+    def _draw_grid(self, state, top, height, bays, rows, tiers, is_vessel):
+        """Draw a grid section (vessel or yard) with fixed cell size"""
+        import pygame
+
+        # Fixed cell size and layout constants
+        cell_width, cell_height, padding, label_margin = 35, 35, 30, 15
+        left_margin = max(padding, (self.screen_width - bays * rows * cell_width) / 2)
+        small_font = pygame.font.Font(None, 20)
+        tiny_font = pygame.font.Font(None, 18)
+
+        # Draw tier labels and bay labels
+        for t in range(1, tiers + 1):
+            y = top + (tiers - t) * cell_height + cell_height / 2
+            self.screen.blit(
+                small_font.render(f"{t}", True, (0, 0, 0)),
+                (left_margin - label_margin, y - small_font.render(f"{t}", True, (0, 0, 0)).get_height() / 2),
+            )
+
+        for b in range(bays):
+            bay_num = b * 2 + 1
+            bay_x = left_margin + b * rows * cell_width + (rows * cell_width) / 2
+            bay_label = small_font.render(f"Bay {bay_num}", True, (0, 0, 0))
+            self.screen.blit(bay_label, bay_label.get_rect(center=(bay_x, top - 10)))
+
+        # Map state to grid cells
+        occupied_cells = {}
+        for i in range(len(state)):
+            bay, row, tier = [int(state[i, j]) for j in [StateIds.BAY.value, StateIds.ROW.value, StateIds.TIER.value]]
+            is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
+            is_target = is_vessel and self.current_vessel_slot == i
+
+            if is_occupied or is_target:
+                if bay % 2 == 1:
+                    occupied_cells[(bay, row, tier)] = {"filled": is_occupied, "target": is_target, "idx": i}
+                else:
+                    for adj_bay in [bay - 1, bay + 1]:
+                        if 1 <= adj_bay <= bays * 2:
+                            occupied_cells[(adj_bay, row, tier)] = {
+                                "filled": is_occupied,
+                                "target": is_target,
+                                "idx": i,
+                            }
+
+        # Draw all cells and row labels
+        for b in range(bays):
+            bay_num = b * 2 + 1
+            for r in range(1, rows + 1):
+                # Draw row label at bottom
+                x_label = left_margin + b * rows * cell_width + (r - 1) * cell_width + cell_width / 2
+                self.screen.blit(
+                    small_font.render(f"{r}", True, (0, 0, 0)),
+                    small_font.render(f"{r}", True, (0, 0, 0)).get_rect(
+                        center=(x_label, top + tiers * cell_height + label_margin / 2)
+                    ),
+                )
+
+                for t in range(1, tiers + 1):
+                    x = left_margin + b * rows * cell_width + (r - 1) * cell_width
+                    y = top + (tiers - t) * cell_height
+
+                    cell = occupied_cells.get((bay_num, r, t), {"filled": False, "target": False, "idx": None})
+                    color = (0, 102, 204) if cell["filled"] else (255, 255, 255)
+                    rect = pygame.Rect(x, y, cell_width, cell_height)
+
+                    # Draw cell
+                    pygame.draw.rect(self.screen, color, rect)
+                    pygame.draw.rect(
+                        self.screen, (255, 0, 0) if cell["target"] else (0, 0, 0), rect, 3 if cell["target"] else 1
+                    )
+
+                    if cell["filled"] and cell["idx"] is not None:
+                        label = tiny_font.render(f"{cell['idx']}", True, (255, 255, 255))
+                        self.screen.blit(label, label.get_rect(center=(x + cell_width / 2, y + cell_height / 2)))
 
     def _get_bay_groups(self, type="yard") -> dict:
         """generate bay groups based on the yard shape
         Returns:
             dict: dictionary containing bay groups, e.g. {1: [1, 2, 3], 2: [5, 6, 7]}
         """
-        groups = {}
-        group_id = 1
-        if type == "yard":
-            bays = sorted(np.unique(self.yard_state[:, StateIds.BAY.value]))
-        else:
-            bays = sorted(np.unique(self.vessel_state[:, StateIds.BAY.value]))
+        state = self.yard_state if type == "yard" else self.vessel_state
+        bays = sorted(np.unique(state[:, StateIds.BAY.value]))
 
-        current_group = []
+        groups, current_group, group_id = {}, [], 1
+
         for bay in bays:
             if current_group and bay - current_group[-1] > 1:
                 groups[group_id] = current_group
-                group_id += 1
-                current_group = []
+                current_group, group_id = [], group_id + 1
             current_group.append(bay)
 
         if current_group:
