@@ -26,13 +26,6 @@ class StowageEnv(gym.Env):
     }
 
     def __init__(self, config: Dict = None, render_mode: Optional[str] = None):
-        # Render part
-        self.render_mode = render_mode
-        self.screen_width = 600
-        self.screen_height = 400
-        self.screen = None
-        self.isopen = True
-
         if config is None:
             config = {}
 
@@ -41,6 +34,8 @@ class StowageEnv(gym.Env):
         self.num_containers = config.get("num_containers", 4)
         self.container_type = config.get("container_type", "one")
         self.group_num = config.get("group_num", 1)
+        self.group_placement = config.get("group_placement", "fixed")
+        self.seed = config.get("seed", 0)
 
         # Calculate total physical slots
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
@@ -69,12 +64,23 @@ class StowageEnv(gym.Env):
                 max(self.vessel_shape[1], self.yard_shape[1]),  # row upper limit
                 max(self.vessel_shape[2], self.yard_shape[2]),  # tier upper limit
                 1,  # occupied upper limit
+                self.group_num,  # group upper limit
             ),
             shape=(self.obs_coords, 5),
             dtype=np.int32,
         )
         self.action_space = gym.spaces.Discrete(self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2])
         # Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
+
+        # Render part
+        self.render_mode = render_mode
+        self.screen_width = (
+            35 * max(self.vessel_shape[1]*self.vessel_shape[0], self.yard_shape[1]*self.yard_shape[0]) + 60
+        )
+        print(self.screen_width)
+        self.screen_height = 60*max(self.vessel_shape[2],self.yard_shape[2]) + 150
+        self.screen = None
+        self.isopen = True
 
     def step(self, action):
         terminated = False
@@ -256,7 +262,7 @@ class StowageEnv(gym.Env):
             self.screen = pygame.Surface((self.screen_width, self.screen_height))
         self.screen.fill((255, 255, 255))
 
-        padding, title_height, section_gap = 10, 20, 30
+        padding, title_height, section_gap = 10, 20, 50
         vessel_height = (self.screen_height - 3 * padding - 2 * title_height) * 0.4
         yard_height = (self.screen_height - 3 * padding - 2 * title_height) * 0.6
 
@@ -275,7 +281,7 @@ class StowageEnv(gym.Env):
         )
         self._draw_grid(
             self.yard_state,
-            padding + title_height + vessel_height + section_gap,
+            3*padding + 2*title_height + vessel_height + section_gap,
             yard_height,
             self.yard_shape[0],
             self.yard_shape[1],
@@ -469,9 +475,21 @@ class StowageEnv(gym.Env):
                 if self.group_num > 1:
                     containers_per_group = num_to_set // self.group_num
 
-                    for group in range(self.group_num):
-                        start_idx = group * containers_per_group
-                        end_idx = (group + 1) * containers_per_group if group < self.group_num - 1 else num_to_set
+                    if self.group_placement == "fixed":
+                        for group in range(self.group_num):
+                            start_idx = group * containers_per_group
+                            end_idx = (group + 1) * containers_per_group if group < self.group_num - 1 else num_to_set
 
-                        if start_idx < end_idx:
-                            self.yard_state[selected_slots[start_idx:end_idx], StateIds.GROUP.value] = group
+                            if start_idx < end_idx:
+                                self.yard_state[selected_slots[start_idx:end_idx], StateIds.GROUP.value] = group
+                    else:
+                        rng = np.random.RandomState(self.seed)
+
+                        shuffled_indices = rng.permutation(num_to_set)
+                        shuffled_slots = selected_slots[shuffled_indices]
+                        for group in range(self.group_num):
+                            start_idx = group * containers_per_group
+                            end_idx = (group + 1) * containers_per_group if group < self.group_num - 1 else num_to_set
+
+                            if start_idx < end_idx:
+                                self.yard_state[shuffled_slots[start_idx:end_idx], StateIds.GROUP.value] = group
