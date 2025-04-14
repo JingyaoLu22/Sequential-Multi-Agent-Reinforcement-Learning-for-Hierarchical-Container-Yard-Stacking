@@ -1,7 +1,9 @@
+# TODO: formulate non-sequencer version action space
 import numpy as np
 import gymnasium as gym
 from typing import Dict, Tuple, Optional
 from enum import Enum
+import colorsys
 
 
 class StateIds(Enum):
@@ -10,6 +12,7 @@ class StateIds(Enum):
     TIER = 2
     IS_OCCUPIED = 3
     GROUP = 4
+    TIME = 5
 
 
 class StowageEnv(gym.Env):
@@ -36,7 +39,7 @@ class StowageEnv(gym.Env):
         self.group_num = config.get("group_num", 1)
         self.group_placement = config.get("group_placement", "fixed")
         self.seed = config.get("seed", 0)
-
+        self.has_sequencer = config.get("has_sequencer", True)
         # Calculate total physical slots
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_slots = self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2]
@@ -57,6 +60,7 @@ class StowageEnv(gym.Env):
         self.vessel_slots_filled = 0
 
         # Observation and action spaces
+        # shape=(self.obs_coords, 5). Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
         self.observation_space = gym.spaces.Box(
             low=0,
             high=max(
@@ -66,19 +70,23 @@ class StowageEnv(gym.Env):
                 1,  # occupied upper limit
                 self.group_num,  # group upper limit
             ),
-            shape=(self.obs_coords, 5),
+            shape=(self.obs_coords*5, ),
             dtype=np.int32,
         )
-        self.action_space = gym.spaces.Discrete(self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2])
-        # Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
+        if self.has_sequencer:
+            self.action_space = gym.spaces.Discrete(self.total_yard_coords)
+        else:
+            self.action_space = gym.spaces.Discrete(self.total_yard_coords * self.num_vessel_bay * self.vessel_shape[1])
+        # Without a sequencer, the action space is the product of the yard slots and vessel slots(only consider bays and rows variation since only one tier is valid)
+        self.action_array = None
+        self._initialized_action_array = False
 
         # Render part
         self.render_mode = render_mode
         self.screen_width = (
-            35 * max(self.vessel_shape[1]*self.vessel_shape[0], self.yard_shape[1]*self.yard_shape[0]) + 60
+            35 * max(self.vessel_shape[1] * self.vessel_shape[0], self.yard_shape[1] * self.yard_shape[0]) + 60
         )
-        print(self.screen_width)
-        self.screen_height = 60*max(self.vessel_shape[2],self.yard_shape[2]) + 150
+        self.screen_height = 60 * max(self.vessel_shape[2], self.yard_shape[2]) + 150
         self.screen = None
         self.isopen = True
 
@@ -86,61 +94,96 @@ class StowageEnv(gym.Env):
         terminated = False
         truncated = False
         info = {}
-        valid_actions = self._get_valid_yard_actions().tolist()
+        if self.has_sequencer:
+            valid_actions = self._get_valid_yard_actions().tolist()
 
-        if action not in valid_actions:
-            reward = -100.0
+            if action not in valid_actions:
+                reward = -100.0
+                observation = self._create_observation()
+                info["yard_mask"] = valid_actions
+                # truncated = True
+                return observation, reward, terminated, truncated, info
+
+            original_bay = self.yard_state[action, StateIds.BAY.value]
+            original_row = self.yard_state[action, StateIds.ROW.value]
+            original_tier = self.yard_state[action, StateIds.TIER.value]
+            same_bay_row_mask = (
+                (self.yard_state[:, StateIds.BAY.value] == original_bay)
+                & (self.yard_state[:, StateIds.ROW.value] == original_row)
+                & (self.yard_state[:, StateIds.TIER.value] > original_tier)
+                & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+            )
+
+            upper_slots = np.where(same_bay_row_mask)[0]  # get containers above the action container
+            sorted_upper_slots = []
+            if len(upper_slots) > 0:
+                # Sort containers from bottom to top (ascending tier order)
+                sorted_upper_slots = sorted(upper_slots, key=lambda x: self.yard_state[x, StateIds.TIER.value])
+                container_group = self.yard_state[action, StateIds.GROUP.value]
+                self.yard_state[action, StateIds.IS_OCCUPIED.value] = 0
+
+                for slot in sorted_upper_slots:
+                    current_tier = self.yard_state[slot, StateIds.TIER.value]
+                    new_tier = current_tier - 1
+                    self.yard_state[slot, StateIds.TIER.value] = new_tier
+            else:
+                # No containers above, just remove the container and get its group
+                container_group = self.yard_state[action, StateIds.GROUP.value]
+                self.yard_state[action, StateIds.IS_OCCUPIED.value] = 0
+
+            self.vessel_state[self.current_vessel_slot, StateIds.IS_OCCUPIED.value] = 1
+            self.vessel_state[self.current_vessel_slot, StateIds.GROUP.value] = container_group
+            self.available_groups = np.unique(
+                self.yard_state[self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1, StateIds.GROUP.value]
+            )
+
+            self.vessel_slots_filled += 1
+            self.current_vessel_slot = self._get_next_vessel_slot()
+
+            shifters = len(sorted_upper_slots)
+            reward = -shifters
+            terminated = (self.current_vessel_slot is None) or (self.available_groups.size == 0)
+            valid_actions = self._get_valid_yard_actions() if not terminated else []
+
             observation = self._create_observation()
-            info["yard_mask"] = valid_actions
+            info.update({"yard_mask": valid_actions, "shifters": shifters, "vessel_slots_filled": self.vessel_slots_filled})
+
             return observation, reward, terminated, truncated, info
-
-        original_bay = self.yard_state[action, StateIds.BAY.value]
-        original_row = self.yard_state[action, StateIds.ROW.value]
-        original_tier = self.yard_state[action, StateIds.TIER.value]
-        same_bay_row_mask = (
-            (self.yard_state[:, StateIds.BAY.value] == original_bay)
-            & (self.yard_state[:, StateIds.ROW.value] == original_row)
-            & (self.yard_state[:, StateIds.TIER.value] > original_tier)
-            & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
-        )
-
-        upper_slots = np.where(same_bay_row_mask)[0]  # get containers above the action container
-        sorted_upper_slots = []
-        if len(upper_slots) > 0:
-            # Sort containers from bottom to top (ascending tier order)
-            sorted_upper_slots = sorted(upper_slots, key=lambda x: self.yard_state[x, StateIds.TIER.value])
-            container_group = self.yard_state[action, StateIds.GROUP.value]
-            self.yard_state[action, StateIds.IS_OCCUPIED.value] = 0
-
-            for slot in sorted_upper_slots:
-                current_tier = self.yard_state[slot, StateIds.TIER.value]
-                new_tier = current_tier - 1
-                self.yard_state[slot, StateIds.TIER.value] = new_tier
+        
         else:
-            # No containers above, just remove the container and get its group
-            container_group = self.yard_state[action, StateIds.GROUP.value]
-            self.yard_state[action, StateIds.IS_OCCUPIED.value] = 0
+            pass
 
-        self.vessel_state[self.current_vessel_slot, StateIds.IS_OCCUPIED.value] = 1
-        self.vessel_state[self.current_vessel_slot, StateIds.GROUP.value] = container_group
-        self.available_groups = np.unique(
-            self.yard_state[self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1, StateIds.GROUP.value]
-        )
+    def _initialize_action_array(self):
+        if self._initialized_action_array:
+            return
+        
+        combinations = []
+        vessel_slots = np.arange(len(self.vessel_state))
+        if self.container_type == "one":
+            vessel_slots = vessel_slots[self.vessel_state[vessel_slots, StateIds.BAY.value] % 2 == 1]
+        yard_slots = np.arange(len(self.yard_state))
+        if self.container_type == "one":
+            yard_slots = yard_slots[self.yard_state[yard_slots, StateIds.BAY.value] % 2 == 1]
 
-        self.vessel_slots_filled += 1
-        self.current_vessel_slot = self._get_next_vessel_slot()
+        for v_slot in vessel_slots:
+            v_group = self.vessel_state[v_slot, StateIds.GROUP.value]
+            matching_yard_slots = yard_slots[self.yard_state[yard_slots, StateIds.GROUP.value] == v_group]
+            for y_slot in matching_yard_slots:
+                combinations.append([v_slot, y_slot, v_group])
+        self.action_array = np.array(combinations)
+        if not self.has_sequencer:
+            self.action_space = gym.spaces.Discrete(len(self.action_array))
+        
+        self._initialized_action_array = True
 
-        shifters = len(sorted_upper_slots)
-        reward = -shifters
-        terminated = (self.current_vessel_slot is None) or (self.available_groups.size == 0)
-        valid_actions = self._get_valid_yard_actions() if not terminated else []
+    def action_masks(self):
+        return [action in self._get_valid_comb_actions() for action in range(self.action_space.n)]
+                        
+                    
 
-        observation = self._create_observation()
-        info.update({"yard_mask": valid_actions, "shifters": shifters, "vessel_slots_filled": self.vessel_slots_filled})
+                
 
-        return observation, reward, terminated, truncated, info
-
-    def reset(self):
+    def reset(self, seed=None, **kwargs):
         yard_bays = self._generate_bay_coords(self.yard_shape[0])
         _, R, T = self.yard_shape
         self.yard_state = np.zeros((self.total_yard_coords, 5), dtype=int)
@@ -184,7 +227,10 @@ class StowageEnv(gym.Env):
         )
 
         # Get the next vessel slot to fill
-        self.current_vessel_slot = self._get_next_vessel_slot()
+        if self.has_sequencer:
+            self.current_vessel_slot = self._get_next_vessel_slot()
+        else:
+            self._initialize_action_array()
 
         # Create observation
         observation = self._create_observation()
@@ -230,6 +276,7 @@ class StowageEnv(gym.Env):
             state = np.concatenate((state, self.vessel_state[self.current_vessel_slot].reshape(1, -1)), axis=0)
         else:
             state = np.concatenate((state, np.zeros((1, 5), dtype=int)), axis=0)
+        state = state.flatten()
         return state
 
     def _get_valid_yard_actions(self) -> np.ndarray:
@@ -242,6 +289,80 @@ class StowageEnv(gym.Env):
             )
             valid_actions = np.where(occupied_mask & bay_mask & group_mask)[0]
         return valid_actions
+    
+    def _get_valid_comb_actions(self) -> np.ndarray:
+        if self.has_sequencer:
+            return self._get_valid_yard_actions()
+        
+        if not self._initialized_action_array:
+            self._initialize_action_array()
+
+        valid_mask = np.zeros(len(self.action_array), dtype=bool)
+        available_vessel_slots = self._get_available_vessel_slots()
+
+        occupied_yard_slots = np.where(self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)[0]
+
+        for i, (v_slot, y_slot, _) in enumerate(self.action_array):
+            if v_slot not in available_vessel_slots:
+                continue
+            if y_slot not in occupied_yard_slots:
+                continue
+            if self.vessel_state[v_slot, StateIds.GROUP.value] != self.yard_state[y_slot, StateIds.GROUP.value]:
+                continue
+            valid_mask[i] = True
+            valid_actions = np.where(valid_mask)[0]
+        
+        return valid_actions
+
+    def _get_available_vessel_slots(self) -> np.ndarray:
+        odd_bay_mask = self.vessel_state[:, StateIds.BAY.value] % 2 == 1
+        empty_mask = self.vessel_state[:, StateIds.IS_OCCUPIED.value] == 0
+        if self.container_type == "one":
+            valid_mask = odd_bay_mask & empty_mask
+        else:
+            valid_mask = empty_mask
+        empty_slots = np.where(valid_mask)[0]
+
+        if len(empty_slots) == 0:
+            return np.array([], dtype=int)
+
+        tiers = self.vessel_state[empty_slots, StateIds.TIER.value]
+
+        valid_mask = np.ones(len(empty_slots), dtype=bool)
+        tier1_mask = tiers == 1
+        non_tier1_slots = empty_slots[~tier1_mask]
+
+        if len(non_tier1_slots) > 0:
+            for i, slot_idx in enumerate(non_tier1_slots):
+                if not valid_mask[np.where(empty_slots == slot_idx)[0][0]]:
+                    continue
+                bay = self.vessel_state[slot_idx, StateIds.BAY.value]
+                row = self.vessel_state[slot_idx, StateIds.ROW.value]
+                tier = self.vessel_state[slot_idx, StateIds.TIER.value]
+
+                same_bay_row_indices = np.where(
+                    (self.vessel_state[:, StateIds.BAY.value] == bay)
+                    & (self.vessel_state[:, StateIds.ROW.value] == row)
+                )[0]
+
+                lower_indices = same_bay_row_indices[
+                    self.vessel_state[same_bay_row_indices, StateIds.TIER.value] < tier
+                ]
+
+                if len(lower_indices) == 0 or not np.all(
+                    self.vessel_state[lower_indices, StateIds.IS_OCCUPIED.value] == 1
+                ):
+                    valid_mask[np.where(empty_slots == slot_idx)[0][0]] = False
+                    continue
+
+                upper_indices = same_bay_row_indices[
+                    self.vessel_state[same_bay_row_indices, StateIds.TIER.value] > tier
+                ]
+
+                if len(upper_indices) > 0 and np.any(self.vessel_state[upper_indices, StateIds.IS_OCCUPIED.value] == 1):
+                    valid_mask[np.where(empty_slots == slot_idx)[0][0]] = False
+
+        return empty_slots[valid_mask]
 
     def render(self):
         """Render the environment as an RGB array"""
@@ -281,7 +402,7 @@ class StowageEnv(gym.Env):
         )
         self._draw_grid(
             self.yard_state,
-            3*padding + 2*title_height + vessel_height + section_gap,
+            3 * padding + 2 * title_height + vessel_height + section_gap,
             yard_height,
             self.yard_shape[0],
             self.yard_shape[1],
@@ -300,15 +421,17 @@ class StowageEnv(gym.Env):
         small_font = pygame.font.Font(None, 20)
         tiny_font = pygame.font.Font(None, 18)
 
-        # Each tuple is (light_color, dark_color)
-        group_colors = [
-            ((230, 230, 255), (100, 100, 220)),  # Blue group
-            ((230, 255, 230), (100, 220, 100)),  # Green group
-            ((255, 230, 230), (220, 100, 100)),  # Red group
-            ((255, 255, 230), (220, 220, 100)),  # Yellow group
-            ((230, 255, 255), (100, 220, 220)),  # Cyan group
-            ((255, 230, 255), (220, 100, 220)),  # Magenta group
-        ]
+        group_colors = []
+        for i in range(self.group_num):
+            hue = i / self.group_num
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.3, 0.95)
+            light_color = (int(r * 255), int(g * 255), int(b * 255))
+            
+            r, g, b = colorsys.hsv_to_rgb(hue, 0.8, 0.7)
+            dark_color = (int(r * 255), int(g * 255), int(b * 255))
+            
+            group_colors.append((light_color, dark_color))
+
 
         empty_color = (255, 255, 255)  # White for empty slots
 
@@ -337,7 +460,7 @@ class StowageEnv(gym.Env):
                 row = int(state[i, StateIds.ROW.value])
                 tier = int(state[i, StateIds.TIER.value])
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
-                is_target = self.current_vessel_slot == i
+                is_target = self.current_vessel_slot == i if self.current_vessel_slot is not None else False
                 group = int(state[i, StateIds.GROUP.value])
 
                 if bay % 2 == 1:  # Odd bays map directly
@@ -427,9 +550,16 @@ class StowageEnv(gym.Env):
                     line_width = 3 if cell["target"] else 1
                     pygame.draw.rect(self.screen, line_color, rect, line_width)
 
-                    if cell["filled"] and cell["idx"] is not None:
-                        label = tiny_font.render(f"{cell['idx']}", True, (255, 255, 255))
-                        self.screen.blit(label, label.get_rect(center=(x + cell_width / 2, y + cell_height / 2)))
+                    if cell["idx"] is not None:
+                        if is_vessel:
+                            text_color = (
+                                (255, 255, 255) if cell["filled"] else (50, 50, 50)
+                            )  
+                            label = tiny_font.render(f"{cell['idx']}", True, text_color)
+                            self.screen.blit(label, label.get_rect(center=(x + cell_width / 2, y + cell_height / 2)))
+                        elif cell["filled"]:
+                            label = tiny_font.render(f"{cell['idx']}", True, (255, 255, 255))
+                            self.screen.blit(label, label.get_rect(center=(x + cell_width / 2, y + cell_height / 2)))
 
         for b in range(bays + 1):
             x = left_margin + b * rows * cell_width
