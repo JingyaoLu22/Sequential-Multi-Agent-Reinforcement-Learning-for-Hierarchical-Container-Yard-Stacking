@@ -1,3 +1,6 @@
+"""
+A brute-force enumeration algorithm to solve the stowage environment using a depth-first search."""
+
 import copy
 
 
