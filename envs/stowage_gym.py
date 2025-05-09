@@ -15,13 +15,6 @@ class StateIds(Enum):
 
 
 class StowageEnv(gym.Env):
-    """
-    Args:
-            - "one": Place only the 20-feet containers in the yard.
-            - "two": Place only the 40-feet containers in the yard.
-            - "mixed": Place both 20-feet and 40-feet containers in the yard.
-    """
-
     metadata = {
         "render_modes": ["rgb_array"],
     }
@@ -39,11 +32,13 @@ class StowageEnv(gym.Env):
         # Calculate total physical slots
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_slots = self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2]
+        self.total_timesteps = 0 # Use to deal with timeout
 
         self.num_containers = min(self.num_containers, self.total_yard_slots)
-        warnings.warn(
-            f"Number of containers is set to {self.num_containers} as it exceeds the total yard slots {self.total_yard_slots}"
-        ) 
+        if self.num_containers > self.total_yard_slots:
+            warnings.warn(
+                f"Number of containers is set to {self.num_containers} as it exceeds the total yard slots {self.total_yard_slots}"
+            ) 
         self.num_slot_attrs = 5
 
         # Calculate total coordinates
@@ -78,7 +73,7 @@ class StowageEnv(gym.Env):
                 self.group_num,  # group upper limit
             ),
             shape=(self.obs_coords * self.num_slot_attrs,),
-            dtype=np.int32,
+            dtype=np.int64,
         )
 
         self.action_space = gym.spaces.Discrete(self.total_yard_coords)
@@ -92,6 +87,8 @@ class StowageEnv(gym.Env):
         self.screen = None
 
     def step(self, action):
+        self.total_timesteps += 1
+        truncated = False if self.total_timesteps < self.num_containers*10 else True # Handle timeout
         truncated = False
         info = {}
         valid_actions = self._get_valid_yard_actions().tolist()
@@ -102,8 +99,7 @@ class StowageEnv(gym.Env):
             info["yard_mask"] = valid_actions
             terminated = False
             return observation, reward, terminated, truncated, info
-        print(action, self.current_vessel_slot)
-        shifters = self._process_shifters(self, action, self.current_vessel_slot)
+        shifters = self._process_shifters(action, self.current_vessel_slot)
         # Sequencer select next vessel slot
         self.current_vessel_slot = self._get_next_vessel_slot()
         reward = -shifters
@@ -184,6 +180,7 @@ class StowageEnv(gym.Env):
 
     def reset(self, seed=None, **kwargs):
         # seed args for compatibility with some RL frameworks, need to remove after test SB3 compatibility
+        self.total_timesteps = 0
         yard_bays = self._generate_bay_coords(self.yard_shape[0])
         _, R, T = self.yard_shape
         self.yard_state = np.zeros((self.total_yard_coords, self.num_slot_attrs), dtype=int)

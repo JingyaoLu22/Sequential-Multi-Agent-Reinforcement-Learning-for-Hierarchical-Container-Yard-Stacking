@@ -16,7 +16,7 @@ class MultiCraneStowageEnv(StowageEnv):
         self.time_penalty_coef = config.get("time_penalty_coef", 0.01)
 
         self.crane_positions = None
-        self.crane_busy_until = np.zeros(self.num_cranes)
+        self.crane_busy_until = np.zeros(self.num_cranes, dtype=np.int64)
         self.current_time = 0
         self.total_shifters = 0
         # Sequencers for all cranes
@@ -36,12 +36,12 @@ class MultiCraneStowageEnv(StowageEnv):
             shape=(
                 self.obs_coords * 5 + self.num_cranes * 2 + 1,
             ),  # original state + crane positions + busy time + global time
-            dtype=np.int32,
+            dtype=np.int64,
         )
         self.action_space = gym.spaces.Discrete(self.total_yard_coords * self.num_cranes)
 
     def reset(self, seed=None, **kwargs):
-        _, info = super().reset(seed, **kwargs)
+        _, info = super().reset(seed=seed, **kwargs)
 
         self.time_arr = self._get_randomized_time_array()
         self.current_time = 0
@@ -50,7 +50,7 @@ class MultiCraneStowageEnv(StowageEnv):
         self.crane_positions = np.array(
             [1 + i * max(1, self.vessel_shape[0] // self.num_cranes) for i in range(self.num_cranes)]
         )
-        self.crane_busy_until = np.zeros(self.num_cranes)
+        self.crane_busy_until = np.zeros(self.num_cranes, dtype=np.int64)
 
         all_bays = np.unique(self.vessel_state[:, StateIds.BAY.value])
         odd_bays = all_bays[all_bays % 2 == 1]
@@ -76,7 +76,7 @@ class MultiCraneStowageEnv(StowageEnv):
     def _create_observation(self):
         state = super()._create_observation()
         state = np.append(state, self.crane_positions)
-        busy_relative = self.crane_busy_until - self.current_time
+        busy_relative = self.crane_busy_until - np.repeat(self.current_time, self.num_cranes)
         state = np.append(state, busy_relative)
         state = np.append(state, self.current_time)
 

@@ -34,7 +34,7 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
                     1000,  # time max limit
                 ),
                 shape=(obs_size,),
-                dtype=np.int32,
+                dtype=np.int64,
             )
             for agent in self.possible_agents
         }
