@@ -1,0 +1,23 @@
+general:
+  env_name: SPGE
+  n_trials: 50
+  n_startup_trials: 5
+  n_evaluations: 5
+  n_timesteps: 8000
+  n_eval_episodes: 5
+  algorithm: dqn
+  timeout: 90000
+  storage_file: "./hpo_studies/SPGE.log"
+  notes: "45c"
+
+logging:
+  use_logger: true
+  wandb_project: "sb3-hpo" #"stowAI-rl-basic-training"
+
+environment:
+  vessel_shape: [3,5,3]
+  yard_shape: [3,5,3]
+  num_containers: 45
+  group_num: 3
+  group_placement: random
+  seed: 4307

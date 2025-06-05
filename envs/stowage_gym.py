@@ -13,7 +13,6 @@ class StateIds(Enum):
     IS_OCCUPIED = 3
     GROUP = 4
 
-
 class StowageEnv(gym.Env):
     metadata = {
         "render_modes": ["rgb_array"],
@@ -30,6 +29,7 @@ class StowageEnv(gym.Env):
         self.group_placement = config.get("group_placement", "fixed")
         self.seed = config.get("seed", 0)
         # Calculate total physical slots
+        self.total_shifters = 0
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_slots = self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2]
         self.total_timesteps = 0 # Use to deal with timeout
@@ -107,7 +107,9 @@ class StowageEnv(gym.Env):
         valid_actions = self._get_valid_yard_actions() if not terminated else []
 
         observation = self._create_observation()
+        self.total_shifters += shifters
         info.update({"yard_mask": valid_actions, "shifters": shifters, "vessel_slots_filled": self.vessel_slots_filled})
+        info["total_shifters"] = self.total_shifters
 
         return observation, reward, terminated, truncated, info
 
@@ -180,6 +182,7 @@ class StowageEnv(gym.Env):
 
     def reset(self, seed=None, **kwargs):
         # seed args for compatibility with some RL frameworks, need to remove after test SB3 compatibility
+        self.total_shifters = 0
         self.total_timesteps = 0
         yard_bays = self._generate_bay_coords(self.yard_shape[0])
         _, R, T = self.yard_shape

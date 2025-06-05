@@ -1,0 +1,33 @@
+general:
+  env_name: SPAEC
+  n_repetition: 10
+  n_evaluations: 10
+  n_timesteps: 40000
+  n_eval_freq: 500
+  algorithm: ppo
+
+logging:
+  wandb_project: "sb3-spge" #"stowAI-rl-basic-training"
+
+environment:
+  vessel_shape: [8,5,5]
+  yard_shape: [8,5,5]
+  num_containers: 200
+  group_num: 8
+  group_placement: random
+  seed: 4307
+  time_penalty_coef: 0.002
+  num_cranes: 3
+
+hyperparameters:
+  gamma: 0.20272163868001408
+  learning_rate: 0.00002856486259800867
+  gae_lambda: 0.9782606377240004
+  n_steps: 1024
+  max_grad_norm: 4.941275830905105
+  ent_coef: 0.9782606377240004
+  policy_kwargs:
+    activation_fn: relu
+    net_arch: 
+      pi: [64]
+      vf: [64]

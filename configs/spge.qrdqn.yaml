@@ -1,0 +1,29 @@
+general:
+  env_name: SPAEC
+  n_repetition: 10
+  n_evaluations: 10
+  n_timesteps: 40000
+  n_eval_freq: 500
+  algorithm: qrdqn
+
+logging:
+  wandb_project: "sb3-spge" #"stowAI-rl-basic-training"
+
+environment:
+  vessel_shape: [8,5,5]
+  yard_shape: [8,5,5]
+  num_containers: 200
+  group_num: 8
+  group_placement: random
+  seed: 4307
+  time_penalty_coef: 0.002
+  num_cranes: 3
+
+hyperparameters:
+  gamma: 0.6047856316932488
+  learning_rate: 0.0004683367521966147
+  learning_starts: 48
+  exploration_fraction: 0.465721034454739
+  target_update_interval: 8112
+  policy_kwargs:
+    activation_fn: relu

@@ -21,7 +21,7 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
             agent: gym.spaces.Discrete(self.total_yard_coords) for agent in self.possible_agents
         }
 
-        obs_size = self.obs_coords * self.num_slot_attrs + self.num_cranes * 2
+        obs_size = self.obs_coords * self.num_slot_attrs + self.num_cranes * 2 + self.total_yard_coords
         self._agent_observation_spaces = {
             agent: gym.spaces.Box(
                 low=0,
@@ -40,6 +40,7 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
         }
         self.observation_space = self._agent_observation_spaces[self.possible_agents[0]]
         self.action_space = self._agent_action_spaces[self.possible_agents[0]]
+        self.time_arr = self._get_randomized_time_array()
 
     def observation_space(self, agent: str) -> gym.spaces.Space:
         """Return observation space for an agent (AEC interface)"""
@@ -118,6 +119,7 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
         state = np.append(state, self.crane_positions)
         busy_relative = self.crane_busy_until - self.current_time
         state = np.append(state, busy_relative)
+        state = np.append(state, self.time_arr)
 
         return state
 
@@ -145,9 +147,12 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
         yard_bay = self.yard_state[yard_slot, StateIds.BAY.value]
 
         shifters = MultiCraneStowageEnv._process_shifters(self, yard_slot, vessel_slot)
-        operation_time = self.time_arr[yard_slot]
+        # operation_time = self.time_arr[yard_slot]
+        operation_time = self.time_arr[yard_slot] + shifters * 50
         self.crane_positions[crane_idx] = yard_bay
         self.crane_busy_until[crane_idx] = self.current_time + operation_time
+        crane_idle_time = max(0,np.sum(self.current_time-self.crane_busy_until))
+        reward = -shifters - crane_idle_time * self.time_penalty_coef * 0.5
 
         self.current_vessel_slots[crane_idx] = MultiCraneStowageEnv._get_next_vessel_slot_for_crane(self,crane_idx)
         MultiCraneStowageEnv._update_crane_vessel_slots(self)
@@ -155,7 +160,7 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
         self.total_shifters += shifters
         self._update_info(crane_idx, shifters, operation_time)
 
-        return -shifters
+        return reward
 
     def _determine_next_agent(self):
         """Select the next agent to act based on availability"""

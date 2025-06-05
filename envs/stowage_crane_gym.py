@@ -22,6 +22,7 @@ class MultiCraneStowageEnv(StowageEnv):
         # Sequencers for all cranes
         self.current_vessel_slots = [None for _ in range(self.num_cranes)]  # current vessel slots for each crane
         self.crane_bay_ranges = None  # bay ranges for each cranes
+        self.time_arr = self._get_randomized_time_array()
 
         self.observation_space = gym.spaces.Box(
             low=0,
@@ -34,7 +35,7 @@ class MultiCraneStowageEnv(StowageEnv):
                 1000,  # time max limit
             ),
             shape=(
-                self.obs_coords * 5 + self.num_cranes * 2 + 1,
+                self.obs_coords * 5 + self.num_cranes * 2 + 1 + self.total_yard_coords,
             ),  # original state + crane positions + busy time + global time
             dtype=np.int64,
         )
@@ -43,7 +44,7 @@ class MultiCraneStowageEnv(StowageEnv):
     def reset(self, seed=None, **kwargs):
         _, info = super().reset(seed=seed, **kwargs)
 
-        self.time_arr = self._get_randomized_time_array()
+        
         self.current_time = 0
         self.total_shifters = 0
 
@@ -79,6 +80,7 @@ class MultiCraneStowageEnv(StowageEnv):
         busy_relative = self.crane_busy_until - np.repeat(self.current_time, self.num_cranes)
         state = np.append(state, busy_relative)
         state = np.append(state, self.current_time)
+        state = np.append(state, self.time_arr)
 
         return state
 
@@ -108,8 +110,6 @@ class MultiCraneStowageEnv(StowageEnv):
 
         sort_order = np.lexsort((rows, tiers, bays))
         return valid_slots[sort_order[0]]
-
-        return None
 
     def _try_steal_work(self, crane_idx):
         """Try to steal work from other cranes"""
@@ -200,6 +200,7 @@ class MultiCraneStowageEnv(StowageEnv):
         return valid_yard_slots, yard_groups
 
     def step(self, action):
+        initial_time = self.current_time # used for reward shaping
         terminated = False
         truncated = False
         info = {}
@@ -213,7 +214,7 @@ class MultiCraneStowageEnv(StowageEnv):
             return observation, reward, terminated, truncated, info
         # Container movement
         shifters = StowageEnv._process_shifters(self, yard_slot, self.current_vessel_slots[crane_idx])
-        operation_time = self.time_arr[yard_slot]
+        operation_time = self.time_arr[yard_slot] + shifters * 50
 
         self.crane_positions[crane_idx] = self.yard_state[yard_slot, StateIds.BAY.value]
         self.crane_busy_until[crane_idx] = self.current_time + operation_time
@@ -224,6 +225,10 @@ class MultiCraneStowageEnv(StowageEnv):
         reward = -shifters
         terminated = self._check_termination()
         self._advance_time()
+        # Reward shaping
+        # reward += (initial_time - self.current_time) * self.time_penalty_coef * 0.1
+        crane_idle_time = max(0,np.sum(self.current_time-self.crane_busy_until))
+        reward -= crane_idle_time * self.time_penalty_coef * 0.5
         observation = self._create_observation()
         info.update(
             {
@@ -241,8 +246,8 @@ class MultiCraneStowageEnv(StowageEnv):
         )
         if np.any(valid_actions) is False and not terminated:
             print("No valid actions available")
-        if terminated:
-            reward -= self.current_time * self.time_penalty_coef
+        # if terminated:
+        #     reward -= self.current_time * self.time_penalty_coef
 
         return observation, reward, terminated, truncated, info
 
