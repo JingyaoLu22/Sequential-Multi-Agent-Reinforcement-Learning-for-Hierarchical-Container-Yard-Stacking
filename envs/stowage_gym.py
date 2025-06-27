@@ -28,11 +28,13 @@ class StowageEnv(gym.Env):
         self.group_num = config.get("group_num", 1)
         self.group_placement = config.get("group_placement", "fixed")
         self.seed = config.get("seed", 0)
+        self.action_mask = config.get("action_mask", "default")
         # Calculate total physical slots
         self.total_shifters = 0
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_slots = self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2]
         self.total_timesteps = 0 # Use to deal with timeout
+        
 
         self.num_containers = min(self.num_containers, self.total_yard_slots)
         if self.num_containers > self.total_yard_slots:
@@ -63,18 +65,32 @@ class StowageEnv(gym.Env):
 
         # Observation and action spaces
         # shape=(self.obs_coords, 5). Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=max(
-                max(self.num_vessel_bay, self.num_yard_bay),  # bay upper limit
-                max(self.vessel_shape[1], self.yard_shape[1]),  # row upper limit
-                max(self.vessel_shape[2], self.yard_shape[2]),  # tier upper limit
-                1,  # occupied upper limit
-                self.group_num,  # group upper limit
-            ),
-            shape=(self.obs_coords * self.num_slot_attrs,),
-            dtype=np.int64,
-        )
+        observation_space = gym.spaces.Box(
+                low=0,
+                high=max(
+                    max(self.num_vessel_bay, self.num_yard_bay),  # bay upper limit
+                    max(self.vessel_shape[1], self.yard_shape[1]),  # row upper limit
+                    max(self.vessel_shape[2], self.yard_shape[2]),  # tier upper limit
+                    1,  # occupied upper limit
+                    self.group_num,  # group upper limit
+                ),
+                shape=(self.obs_coords * self.num_slot_attrs,),
+                dtype=np.int64,
+            )
+        if self.action_mask == "default":
+            self.observation_space = observation_space
+        else:
+            self.observation_space = gym.spaces.Dict(
+                {
+                    "observation": observation_space,
+                    "mask": gym.spaces.Box(
+                        low=0,
+                        high=1,
+                        shape=(self.total_yard_coords,),
+                        dtype=np.bool_
+                    )
+                }
+            )
 
         self.action_space = gym.spaces.Discrete(self.total_yard_coords)
 
@@ -91,7 +107,9 @@ class StowageEnv(gym.Env):
         truncated = False if self.total_timesteps < self.num_containers*10 else True # Handle timeout
         truncated = False
         info = {}
-        valid_actions = self._get_valid_yard_actions().tolist()
+        valid_actions = self._get_valid_yard_actions()
+        if type(valid_actions) is not list:
+            valid_actions = valid_actions.tolist()
 
         if action not in valid_actions:
             reward = -100.0
@@ -176,9 +194,17 @@ class StowageEnv(gym.Env):
         shifters = len(sorted_upper_slots)
         return shifters
 
+    # def action_masks(self):
+    #     # For compatibility with SB3
+    #     return [action in self._get_valid_yard_actions() for action in range(self.action_space.n)]
+
     def action_masks(self):
-        # For compatibility with SB3
-        return [action in self._get_valid_yard_actions() for action in range(self.action_space.n)]
+        """For compatibility with SB3"""
+        if self.current_vessel_slot is None:
+            return [False] * self.action_space.n 
+        
+        valid_actions = self._get_valid_yard_actions()
+        return [action in valid_actions for action in range(self.action_space.n)]
 
     def reset(self, seed=None, **kwargs):
         # seed args for compatibility with some RL frameworks, need to remove after test SB3 compatibility
@@ -275,9 +301,15 @@ class StowageEnv(gym.Env):
         else:
             state = np.concatenate((state, np.zeros((1, 5), dtype=int)), axis=0)
         state = state.flatten()
-        return state
+        if self.action_mask == "default":
+            return state
+        else:
+            mask = self.action_masks()
+            return {"observation": state, "mask": mask}
 
     def _get_valid_yard_actions(self) -> np.ndarray:
+        if self.current_vessel_slot is None:
+            return []
         occupied_mask = self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1
         bay_mask = self.yard_state[:, StateIds.BAY.value] % 2 == 1
         group_mask = (
