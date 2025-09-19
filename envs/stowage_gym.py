@@ -13,6 +13,7 @@ class StateIds(Enum):
     IS_OCCUPIED = 3
     GROUP = 4
 
+
 class StowageEnv(gym.Env):
     metadata = {
         "render_modes": ["rgb_array"],
@@ -33,14 +34,13 @@ class StowageEnv(gym.Env):
         self.total_shifters = 0
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_slots = self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2]
-        self.total_timesteps = 0 # Use to deal with timeout
-        
+        self.total_timesteps = 0  # Use to deal with timeout
 
         self.num_containers = min(self.num_containers, self.total_yard_slots)
         if self.num_containers > self.total_yard_slots:
             warnings.warn(
                 f"Number of containers is set to {self.num_containers} as it exceeds the total yard slots {self.total_yard_slots}"
-            ) 
+            )
         self.num_slot_attrs = 5
 
         # Calculate total coordinates
@@ -66,29 +66,24 @@ class StowageEnv(gym.Env):
         # Observation and action spaces
         # shape=(self.obs_coords, 5). Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
         observation_space = gym.spaces.Box(
-                low=0,
-                high=max(
-                    max(self.num_vessel_bay, self.num_yard_bay),  # bay upper limit
-                    max(self.vessel_shape[1], self.yard_shape[1]),  # row upper limit
-                    max(self.vessel_shape[2], self.yard_shape[2]),  # tier upper limit
-                    1,  # occupied upper limit
-                    self.group_num,  # group upper limit
-                ),
-                shape=(self.obs_coords * self.num_slot_attrs,),
-                dtype=np.int64,
-            )
+            low=0,
+            high=max(
+                max(self.num_vessel_bay, self.num_yard_bay),  # bay upper limit
+                max(self.vessel_shape[1], self.yard_shape[1]),  # row upper limit
+                max(self.vessel_shape[2], self.yard_shape[2]),  # tier upper limit
+                1,  # occupied upper limit
+                self.group_num,  # group upper limit
+            ),
+            shape=(self.obs_coords * self.num_slot_attrs,),
+            dtype=np.int64,
+        )
         if self.action_mask == "default":
             self.observation_space = observation_space
         else:
             self.observation_space = gym.spaces.Dict(
                 {
                     "observation": observation_space,
-                    "mask": gym.spaces.Box(
-                        low=0,
-                        high=1,
-                        shape=(self.total_yard_coords,),
-                        dtype=np.bool_
-                    )
+                    "mask": gym.spaces.Box(low=0, high=1, shape=(self.total_yard_coords,), dtype=np.bool_),
                 }
             )
 
@@ -104,7 +99,7 @@ class StowageEnv(gym.Env):
 
     def step(self, action):
         self.total_timesteps += 1
-        truncated = False if self.total_timesteps < self.num_containers*10 else True # Handle timeout
+        truncated = False if self.total_timesteps < self.num_containers * 10 else True  # Handle timeout
         truncated = False
         info = {}
         valid_actions = self._get_valid_yard_actions()
@@ -131,8 +126,7 @@ class StowageEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
-    def _process_shifters(self, action, vessel_slot):
-        # Get coords of selected container, then get all containers above it
+    def _get_shifters(self, action):
         original_bay = self.yard_state[action, StateIds.BAY.value]
         original_row = self.yard_state[action, StateIds.ROW.value]
         original_tier = self.yard_state[action, StateIds.TIER.value]
@@ -145,6 +139,11 @@ class StowageEnv(gym.Env):
         )
 
         upper_slots = np.where(same_bay_row_mask)[0]
+        return upper_slots
+
+    def _process_shifters(self, action, vessel_slot):
+        # Get coords of selected container, then get all containers above it
+        upper_slots = self._get_shifters(action)
         sorted_upper_slots = []
 
         if len(upper_slots) > 0:
@@ -201,12 +200,21 @@ class StowageEnv(gym.Env):
     def action_masks(self):
         """For compatibility with SB3"""
         if self.current_vessel_slot is None:
-            return [False] * self.action_space.n 
-        
+            return [False] * self.action_space.n
+
         valid_actions = self._get_valid_yard_actions()
         return [action in valid_actions for action in range(self.action_space.n)]
 
     def reset(self, seed=None, **kwargs):
+        self._reset()
+
+        # Create observation
+        observation = self._create_observation()
+        info = {}
+
+        return observation, info
+
+    def _reset(self):
         # seed args for compatibility with some RL frameworks, need to remove after test SB3 compatibility
         self.total_shifters = 0
         self.total_timesteps = 0
@@ -221,7 +229,7 @@ class StowageEnv(gym.Env):
         # For rows we need to repeat the rows for each bay, we also need to repeat each element for a whole tier array
         # like num_bays * (row1, row1, row1, row2, row2, row2, ...). This can be achieved by using np.tile for outer array
         # and np.repeat for inner array
-        # For bays we just need to repeat each elements num_rows * num_tiers times 
+        # For bays we just need to repeat each elements num_rows * num_tiers times
         self.yard_state[:, StateIds.BAY.value] = np.repeat(yard_bays, R * T)
         self.yard_state[:, StateIds.ROW.value] = np.tile(np.arange(1, R + 1).repeat(T), len(yard_bays))
         self.yard_state[:, StateIds.TIER.value] = np.tile(np.arange(1, T + 1), len(yard_bays) * R)
@@ -239,7 +247,6 @@ class StowageEnv(gym.Env):
             odd_bay_indices = np.where(odd_bay_mask)[0]
             valid_slots = odd_bay_indices
 
-
             # Assign groups to vessel slots
             slots_per_group = len(valid_slots) // self.group_num
             for group in range(self.group_num):
@@ -256,12 +263,6 @@ class StowageEnv(gym.Env):
             self.yard_state[self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1, StateIds.GROUP.value]
         )
         self.current_vessel_slot = self._get_next_vessel_slot()
-
-        # Create observation
-        observation = self._create_observation()
-        info = {}
-
-        return observation, info
 
     def _generate_bay_coords(self, physical_bays: int) -> list:
         """Generate bay coordinates based on the number of physical bays. Example: 4 physical bays will have bay_groups as [1, 2, 3], [5]"""

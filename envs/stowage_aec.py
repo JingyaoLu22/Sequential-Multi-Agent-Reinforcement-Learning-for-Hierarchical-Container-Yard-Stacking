@@ -60,7 +60,7 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
         self.truncations = {agent: False for agent in self.agents}
         self.infos = {agent: info for agent in self.agents}
 
-        self._agent_selector = agent_selector(self.agents)
+        self._agent_selector = agent_selector.AgentSelector(self.agents)
         self._determine_next_agent()
 
         return self.observe(self.agent_selection), info
@@ -151,10 +151,10 @@ class StowageAEC(AECEnv, MultiCraneStowageEnv):
         operation_time = self.time_arr[yard_slot] + shifters * 50
         self.crane_positions[crane_idx] = yard_bay
         self.crane_busy_until[crane_idx] = self.current_time + operation_time
-        crane_idle_time = max(0,np.sum(self.current_time-self.crane_busy_until))
+        crane_idle_time = max(0, np.sum(self.current_time - self.crane_busy_until))
         reward = -shifters - crane_idle_time * self.time_penalty_coef * 0.5
 
-        self.current_vessel_slots[crane_idx] = MultiCraneStowageEnv._get_next_vessel_slot_for_crane(self,crane_idx)
+        self.current_vessel_slots[crane_idx] = MultiCraneStowageEnv._get_next_vessel_slot_for_crane(self, crane_idx)
         MultiCraneStowageEnv._update_crane_vessel_slots(self)
 
         self.total_shifters += shifters
