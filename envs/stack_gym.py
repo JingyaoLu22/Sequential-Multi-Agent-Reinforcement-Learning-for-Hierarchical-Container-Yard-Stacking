@@ -44,14 +44,6 @@ class StackEnv(gym.Env):
         self.action_mask = config.get("action_mask", "default")
         self.reward_scheme = config.get("reward_scheme", "progress")
         
-        # Reward coefficients
-        self.base_placement_reward = config.get("base_placement_reward", 10.0)
-        self.same_bay_bonus = config.get("same_bay_bonus", 5.0)
-        self.same_group_nearby_bonus = config.get("same_group_nearby_bonus", 2.0)
-        self.dissimilar_penalty = config.get("dissimilar_penalty", 3.0)
-        self.new_cell_penalty = config.get("new_cell_penalty", 1.0)
-        self.time_penalty_coef = config.get("time_penalty_coef", 0.01)
-        
         # Calculate total physical slots
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_slots = self.yard_shape[0] * self.yard_shape[1] * self.yard_shape[2]
@@ -121,14 +113,27 @@ class StackEnv(gym.Env):
         
         # Get valid actions for current state
         valid_actions = self._get_valid_yard_actions()
-        if type(valid_actions) is not list:
-            valid_actions = valid_actions.tolist()
+        valid_actions_list = valid_actions.tolist() if isinstance(valid_actions, np.ndarray) else list(valid_actions)
 
-        # Check if action is valid
-        if action not in valid_actions:
+        # Check if action is valid (in valid_actions list)
+        if action not in valid_actions_list:
+            # Invalid action (either occupied slot, even bay, or not bottommost tier)
             reward = -100.0
             observation = self._create_observation()
-            info["yard_mask"] = valid_actions
+            info["yard_mask"] = valid_actions_list
+            terminated = False
+            return observation, reward, terminated, truncated, info
+
+        # Check if placement bay is adjacent to vessel container's bay
+        vessel_container_bay = self.vessel_state[self.current_vessel_container, StateIds.BAY.value]
+        yard_placement_bay = self.yard_state[action, StateIds.BAY.value]
+        
+        # Container can only be placed in same bay or adjacent odd bays (left/right)
+        allowed_bays = [vessel_container_bay - 2, vessel_container_bay, vessel_container_bay + 2]
+        if yard_placement_bay not in allowed_bays:
+            reward = -100.0
+            observation = self._create_observation()
+            info["yard_mask"] = valid_actions_list
             terminated = False
             return observation, reward, terminated, truncated, info
 
@@ -147,11 +152,12 @@ class StackEnv(gym.Env):
 
         # Episode terminates when all containers retrieved or no more valid groups
         terminated = (self.current_vessel_container is None) or (self.total_containers_remaining == 0)
-        valid_actions = self._get_valid_yard_actions() if not terminated else []
+        valid_actions = self._get_valid_yard_actions() if not terminated else np.array([], dtype=int)
+        valid_actions_list = valid_actions.tolist() if isinstance(valid_actions, np.ndarray) else list(valid_actions)
 
         observation = self._create_observation()
         info.update({
-            "yard_mask": valid_actions,
+            "yard_mask": valid_actions_list,
             "containers_retrieved": self.containers_retrieved,
             "containers_remaining": self.total_containers_remaining,
         })
@@ -322,85 +328,97 @@ class StackEnv(gym.Env):
             self.containers_retrieved += 1
 
     def _calculate_reward(self, yard_action):
-        """Calculate reward for placing current container at yard_action slot"""
+        """
+        Calculate reward based on exact rules:
+        1. Penalty (-1) for occupying new ground slot (bay, row)
+        2. Reward (+1/-1) for same/dissimilar containers in same (bay, row)
+        3. Reward (+0.25/-0.25) for same/dissimilar in 8-connectivity neighbors
+        """
         placement_bay = self.yard_state[yard_action, StateIds.BAY.value]
         placement_row = self.yard_state[yard_action, StateIds.ROW.value]
         container_group = self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
         
-        reward = self.base_placement_reward
+        reward = 0.0
         
-        # Check if placing in new bay-row cell
+        # Rule 1: Penalty for occupying new ground slot (bay, row)
         if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
-            reward -= self.new_cell_penalty
+            reward -= 1.0
         
-        # Analyze neighbors for cohesion rewards
-        nearby_indices = self._get_nearby_slots(yard_action)
+        # Rule 2: Reward/penalty for same/dissimilar containers in same (bay, row) slot
+        bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
+                       (self.yard_state[:, StateIds.ROW.value] == placement_row)
+        bay_row_indices = np.where(bay_row_mask)[0]
         
-        same_group_nearby = 0
-        dissimilar_nearby = 0
-        same_bay_same_group = 0
-        
-        for idx in nearby_indices:
-            if self.yard_state[idx, StateIds.IS_OCCUPIED.value] == 1:
+        for idx in bay_row_indices:
+            if idx != yard_action and self.yard_state[idx, StateIds.IS_OCCUPIED.value] == 1:
                 neighbor_group = self.yard_state[idx, StateIds.GROUP.value]
-                neighbor_bay = self.yard_state[idx, StateIds.BAY.value]
-                
                 if neighbor_group == container_group:
-                    same_group_nearby += 1
-                    if neighbor_bay == placement_bay:
-                        same_bay_same_group += 1
+                    reward += 1.0
                 else:
-                    dissimilar_nearby += 1
+                    reward -= 1.0
         
-        # Add cohesion bonuses
-        if same_bay_same_group > 0:
-            reward += self.same_bay_bonus
-        else:
-            reward += same_group_nearby * self.same_group_nearby_bonus
+        # Rule 3: 8-connectivity neighbors (bay, row only - ignore tier)
+        # 8 adjacent positions: bay±1, row±1 combinations
+        adjacent_positions = [
+            (placement_bay - 1, placement_row - 1),
+            (placement_bay - 1, placement_row),
+            (placement_bay - 1, placement_row + 1),
+            (placement_bay, placement_row - 1),
+            (placement_bay, placement_row + 1),
+            (placement_bay + 1, placement_row - 1),
+            (placement_bay + 1, placement_row),
+            (placement_bay + 1, placement_row + 1),
+        ]
         
-        # Add dissimilar penalty
-        reward -= dissimilar_nearby * self.dissimilar_penalty
-        
-        # Add time penalty
-        reward -= self.time_penalty_coef * self.total_timesteps
+        for adj_bay, adj_row in adjacent_positions:
+            # Check all containers in adjacent (bay, row) ground slot
+            adj_mask = (self.yard_state[:, StateIds.BAY.value] == adj_bay) & \
+                       (self.yard_state[:, StateIds.ROW.value] == adj_row) & \
+                       (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+            adj_indices = np.where(adj_mask)[0]
+            
+            for idx in adj_indices:
+                neighbor_group = self.yard_state[idx, StateIds.GROUP.value]
+                if neighbor_group == container_group:
+                    reward += 0.25
+                else:
+                    reward -= 0.25
         
         return reward
 
-    def _get_nearby_slots(self, slot_idx, radius=1):
-        """Get nearby slot indices (within radius in bay/row/tier space)"""
-        bay = self.yard_state[slot_idx, StateIds.BAY.value]
-        row = self.yard_state[slot_idx, StateIds.ROW.value]
-        tier = self.yard_state[slot_idx, StateIds.TIER.value]
-        
-        nearby = []
-        for idx in range(len(self.yard_state)):
-            if idx == slot_idx:
-                continue
-            other_bay = self.yard_state[idx, StateIds.BAY.value]
-            other_row = self.yard_state[idx, StateIds.ROW.value]
-            other_tier = self.yard_state[idx, StateIds.TIER.value]
-            
-            # Check if within radius
-            bay_diff = abs(other_bay - bay)
-            row_diff = abs(other_row - row)
-            tier_diff = abs(other_tier - tier)
-            
-            if bay_diff <= radius and row_diff <= radius and tier_diff <= radius:
-                nearby.append(idx)
-        
-        return nearby
-
     def _get_valid_yard_actions(self) -> np.ndarray:
-        """Get valid yard placement slots"""
+        """Get valid yard placement slots - only bottommost unoccupied tier per (bay, row) in odd bays"""
         if self.current_vessel_container is None:
-            return np.array([])
+            return np.array([], dtype=int)
         
-        # Valid slots: unoccupied, odd bay
+        valid_actions = []
+        
+        # Get all unoccupied slots in odd bays
         unoccupied_mask = self.yard_state[:, StateIds.IS_OCCUPIED.value] == 0
-        bay_mask = self.yard_state[:, StateIds.BAY.value] % 2 == 1
+        bay_values = self.yard_state[:, StateIds.BAY.value]
+        bay_mask = (bay_values % 2) == 1
+        valid_mask = unoccupied_mask & bay_mask
+        valid_indices = np.where(valid_mask)[0]
         
-        valid_actions = np.where(unoccupied_mask & bay_mask)[0]
-        return valid_actions
+        if len(valid_indices) == 0:
+            return np.array([], dtype=int)
+        
+        # Find unique (bay, row) combinations from valid slots
+        bays = self.yard_state[valid_indices, StateIds.BAY.value]
+        rows = self.yard_state[valid_indices, StateIds.ROW.value]
+        tiers = self.yard_state[valid_indices, StateIds.TIER.value]
+        
+        unique_bay_rows = set(zip(bays, rows))
+        
+        # For each (bay, row), find the lowest unoccupied tier
+        for bay, row in unique_bay_rows:
+            mask = (bays == bay) & (rows == row)
+            indices_in_slot = valid_indices[mask]
+            tiers_in_slot = tiers[mask]
+            min_tier_idx = np.argmin(tiers_in_slot)
+            valid_actions.append(indices_in_slot[min_tier_idx])
+        
+        return np.array(valid_actions, dtype=int)
 
     def action_masks(self):
         """For compatibility with SB3"""
@@ -448,8 +466,8 @@ class StackEnv(gym.Env):
         yard_height = (self.screen_height - 3 * padding - 2 * title_height) * 0.6
 
         font = pygame.font.Font(None, 24)
-        self.screen.blit(font.render("Vessel (Depleting)", True, (0, 0, 0)), (padding, padding))
-        self.screen.blit(font.render("Yard (Growing)", True, (0, 0, 0)), (padding, padding + vessel_height + section_gap))
+        self.screen.blit(font.render("Vessel", True, (0, 0, 0)), (padding, padding))
+        self.screen.blit(font.render("Yard", True, (0, 0, 0)), (padding, padding + vessel_height + section_gap))
 
         self._draw_grid(
             self.vessel_state,
