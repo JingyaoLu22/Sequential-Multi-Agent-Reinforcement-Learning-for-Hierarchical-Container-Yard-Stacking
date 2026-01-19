@@ -332,7 +332,7 @@ class StackEnv(gym.Env):
         Calculate reward based on exact rules:
         1. Penalty (-1) for occupying new ground slot (bay, row)
         2. Reward (+1/-1) for same/dissimilar containers in same (bay, row)
-        3. Reward (+0.25/-0.25) for same/dissimilar in 8-connectivity neighbors
+        3. Reward (+0.25/-0.25) for same/dissimilar in adjacent rows (same bay only)
         """
         placement_bay = self.yard_state[yard_action, StateIds.BAY.value]
         placement_row = self.yard_state[yard_action, StateIds.ROW.value]
@@ -357,22 +357,17 @@ class StackEnv(gym.Env):
                 else:
                     reward -= 1.0
         
-        # Rule 3: 8-connectivity neighbors (bay, row only - ignore tier)
-        # 8 adjacent positions: bay±1, row±1 combinations
-        adjacent_positions = [
-            (placement_bay - 1, placement_row - 1),
-            (placement_bay - 1, placement_row),
-            (placement_bay - 1, placement_row + 1),
-            (placement_bay, placement_row - 1),
-            (placement_bay, placement_row + 1),
-            (placement_bay + 1, placement_row - 1),
-            (placement_bay + 1, placement_row),
-            (placement_bay + 1, placement_row + 1),
-        ]
+        # Rule 3: Adjacent rows in same bay only (ignore tier)
+        # Check row±1 within bounds (rows are 1-indexed from 1 to yard_shape[1])
+        adjacent_rows = []
+        if placement_row > 1:
+            adjacent_rows.append(placement_row - 1)
+        if placement_row < self.yard_shape[1]:
+            adjacent_rows.append(placement_row + 1)
         
-        for adj_bay, adj_row in adjacent_positions:
+        for adj_row in adjacent_rows:
             # Check all containers in adjacent (bay, row) ground slot
-            adj_mask = (self.yard_state[:, StateIds.BAY.value] == adj_bay) & \
+            adj_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
                        (self.yard_state[:, StateIds.ROW.value] == adj_row) & \
                        (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
             adj_indices = np.where(adj_mask)[0]
@@ -578,6 +573,8 @@ class StackEnv(gym.Env):
                 if bay % 2 == 1:
                     cell_info[(bay, row, tier)] = self._create_cell_props(is_occupied, is_target, i, group)
 
+            
+            # handle even bays
             for i in range(len(state)):
                 bay = int(state[i, StateIds.BAY.value])
                 row = int(state[i, StateIds.ROW.value])
@@ -585,6 +582,7 @@ class StackEnv(gym.Env):
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
 
+                # Only apply even bay influence if it's occupied
                 if bay % 2 == 0 and is_occupied:
                     for adj_bay in [bay - 1, bay + 1]:
                         if 1 <= adj_bay <= bays * 2:
@@ -603,9 +601,10 @@ class StackEnv(gym.Env):
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
 
-                if bay % 2 == 1 and is_occupied:
-                    cell_info[(bay, row, tier)] = self._create_cell_props(True, False, i, group)
+                if bay % 2 == 1:
+                    cell_info[(bay, row, tier)] = self._create_cell_props(is_occupied, False, i, group)
 
+            # handle even yard bays (should not be occupied but just in case)
             for i in range(len(state)):
                 bay = int(state[i, StateIds.BAY.value])
                 row = int(state[i, StateIds.ROW.value])
@@ -616,7 +615,7 @@ class StackEnv(gym.Env):
                 if bay % 2 == 0 and is_occupied:
                     for adj_bay in [bay - 1, bay + 1]:
                         if 1 <= adj_bay <= bays * 2:
-                            cell_info[(adj_bay, row, tier)] = self._create_cell_props(True, False, i, group)
+                            cell_info[(adj_bay, row, tier)] = self._create_cell_props(is_occupied, False, i, group)
 
         return cell_info
 
@@ -698,8 +697,9 @@ class StackEnv(gym.Env):
                 text_color = (255, 255, 255) if cell["filled"] else (50, 50, 50)
                 label = fonts["tiny"].render(f"{cell['idx']}", True, text_color)
                 self.screen.blit(label, label.get_rect(center=(x + width / 2, y + height / 2)))
-            elif cell["filled"]:
-                label = fonts["tiny"].render(f"{cell['idx']}", True, (255, 255, 255))
+            else:
+                text_color = (255, 255, 255) if cell["filled"] else (50, 50, 50)
+                label = fonts["tiny"].render(f"{cell['idx']}", True, text_color)
                 self.screen.blit(label, label.get_rect(center=(x + width / 2, y + height / 2)))
 
     def _draw_bay_dividers(self, left_margin, top, bays, rows, cell_width, tiers, cell_height, color):
