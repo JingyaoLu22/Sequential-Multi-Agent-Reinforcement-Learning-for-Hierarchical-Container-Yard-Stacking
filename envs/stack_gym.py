@@ -22,7 +22,7 @@ class StackEnv(gym.Env):
     from the vessel (top containers first) and places them in the yard. The goal is to:
     1. Place similar-group containers close together (bonus if same bay)
     2. Avoid placing near dissimilar containers (penalty)
-    3. Consolidate space by reusing bays (penalty for using new bay/row cells)
+    3. Consolidate space by reusing bays (penalty for using new bay/row cells combinations)
     
     Agent has flexible group retrieval order - can choose which group to retrieve next.
     """
