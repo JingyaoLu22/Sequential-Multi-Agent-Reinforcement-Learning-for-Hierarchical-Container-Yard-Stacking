@@ -396,9 +396,10 @@ class StackEnv(gym.Env):
         Calculate reward based on exact rules:
         1. Penalty (-1) for occupying new unoccupied ground slot in stack
         2. Reward (+1/-1) for placing container in a stack having same/dissimilar containers in the same stack.
-        3. Reward (+0.25/-0.25) for placing container having same/dissimilar containers in +/-1 adjacent rows (same bay only)
+        3. Reward (+0.5/-0.5) for placing container having same/dissimilar containers in +/-1 adjacent rows (same bay only)
+        4. Reward (+0.25/-0.25) for placing container having same/dissimilar containers in other stacks in same bay (not same row or adjacent rows)
         
-        2 and 3 rewards are added for each similar/dissimilar container found in the same stack or adjacent rows.
+        2,3 and 4 rewards are added for each similar/dissimilar container found in the same stack or adjacent rows.
         """
         placement_bay = self.yard_state[yard_action, StateIds.BAY.value]
         placement_row = self.yard_state[yard_action, StateIds.ROW.value]
@@ -408,40 +409,62 @@ class StackEnv(gym.Env):
         
         # Rule 1: Penalty for occupying new ground slot in unoccupied stack
         if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
-            reward -= 1.0
+            reward -= 0.5
         
         # Rule 2: Reward/penalty for placing container in a stack having same/dissimilar containers in the same stack.
-        bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & (self.yard_state[:, StateIds.ROW.value] == placement_row)
+        bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
+                        (self.yard_state[:, StateIds.ROW.value] == placement_row)
         bay_row_indices = np.where(bay_row_mask)[0]
-        
-        for idx in bay_row_indices:
-            if idx != yard_action and self.yard_state[idx, StateIds.IS_OCCUPIED.value] == 1:
-                neighbor_group = self.yard_state[idx, StateIds.GROUP.value]
-                if neighbor_group == container_group:
-                    reward += 1.0
-                else:
-                    reward -= 1.0
-        
-        # Rule 3: Reward/penalty for placing container having same/dissimilar containers in +/-1 adjacent rows.
-        # Check +/- 1 adjacent rows in the same bay
+
+        same_stack_occupied_mask = self.yard_state[bay_row_indices, StateIds.IS_OCCUPIED.value] == 1
+        same_stack_occupied_slots = bay_row_indices[same_stack_occupied_mask]
+
+        if len(same_stack_occupied_slots) > 0:
+            same_stack_container_groups = self.yard_state[same_stack_occupied_slots, StateIds.GROUP.value]
+            same_group_count = np.sum(same_stack_container_groups == container_group)
+            diff_group_count = np.sum(same_stack_container_groups != container_group)
+            reward += (same_group_count - diff_group_count) * 1.0
+
+        # Find  +/- 1 adjacent rows in the same bay
         adjacent_rows = []
         if placement_row > 1:
             adjacent_rows.append(placement_row - 1)
         if placement_row < self.yard_shape[1]:
             adjacent_rows.append(placement_row + 1)
+
         
-        for adj_row in adjacent_rows:
-            adj_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
-                       (self.yard_state[:, StateIds.ROW.value] == adj_row) & \
-                       (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
-            adj_indices = np.where(adj_mask)[0]
-            
-            for idx in adj_indices:
-                neighbor_group = self.yard_state[idx, StateIds.GROUP.value]
-                if neighbor_group == container_group:
-                    reward += 0.25
-                else:
-                    reward -= 0.25
+        # Rule 4 reward/penalty for other stacks in same bay (not same row or adjacent rows)
+        same_bay_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
+                        (self.yard_state[:, StateIds.ROW.value] != placement_row) & \
+                         ~np.isin(self.yard_state[:,StateIds.ROW.value],adjacent_rows)
+        
+        same_bay_indices = np.where(same_bay_mask)[0]
+
+        same_bay_occupied_slots_mask = self.yard_state[same_bay_indices, StateIds.IS_OCCUPIED.value] == 1
+        same_bay_occupied_slots = same_bay_indices[same_bay_occupied_slots_mask]
+
+        if len(same_bay_occupied_slots) > 0:
+            same_bay_container_groups = self.yard_state[same_bay_occupied_slots, StateIds.GROUP.value]
+            same_group_count = np.sum(same_bay_container_groups == container_group)
+            diff_group_count = np.sum(same_bay_container_groups != container_group)
+            reward += (same_group_count - diff_group_count) * 0.25
+
+        # Rule 3 reward/penalty for adjacent rows in same bay
+        adj_stack_mask = (self.yard_state[:,StateIds.BAY.value] == placement_bay) & \
+                            np.isin(self.yard_state[:, StateIds.ROW.value], adjacent_rows)
+        adj_stack_indices = np.where(adj_stack_mask)[0]
+
+        adj_occupied_slots_mask = self.yard_state[adj_stack_indices, StateIds.IS_OCCUPIED.value] == 1
+        adj_occupied_slots = adj_stack_indices[adj_occupied_slots_mask]
+
+        if len(adj_occupied_slots) > 0:
+            adj_stack_container_groups = self.yard_state[adj_occupied_slots, StateIds.GROUP.value]
+            same_group_count = np.sum(adj_stack_container_groups == container_group)
+            diff_group_count = np.sum(adj_stack_container_groups != container_group)
+            reward += (same_group_count - diff_group_count) * 0.5
+
+        
+
         
         return reward
 
