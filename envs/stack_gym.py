@@ -136,16 +136,16 @@ class StackEnv(gym.Env):
         vessel_container_bay = self.vessel_state[self.current_vessel_container, StateIds.BAY.value]
         yard_placement_bay = self.yard_state[action, StateIds.BAY.value]
         
-        # Container can only be placed in same bay or adjacent bays (left/right)
+        # Container can only be placed in same bay or adjacent bays (left/right) (REMOVING THIS FOR NOW)
         # Huge negative reward if agent tries to place container in non-adjacent bay.
         # In this case, action does not change environment
-        allowed_bays = [vessel_container_bay - 2, vessel_container_bay, vessel_container_bay + 2]
-        if yard_placement_bay not in allowed_bays:
-            reward = -100.0
-            observation = self._create_observation()
-            info["yard_mask"] = valid_actions_list
-            terminated = False
-            return observation, reward, terminated, truncated, info
+        # allowed_bays = [vessel_container_bay - 2, vessel_container_bay, vessel_container_bay + 2]
+        # if yard_placement_bay not in allowed_bays:
+            # reward = -100.0
+            # observation = self._create_observation()
+            # info["yard_mask"] = valid_actions_list
+            # terminated = False
+            # return observation, reward, terminated, truncated, info
 
         # Calculate reward
         reward = self._calculate_reward(action)
@@ -407,9 +407,9 @@ class StackEnv(gym.Env):
         
         reward = 0.0
         
-        # Rule 1: Penalty for occupying new ground slot in unoccupied stack
-        if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
-            reward -= 0.5
+        # Rule 1: Penalty for occupying new ground slot in unoccupied stack (REMOVING THIS FOR NOW)
+        # if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
+            # reward -= 0.5
         
         # Rule 2: Reward/penalty for placing container in a stack having same/dissimilar containers in the same stack.
         bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
