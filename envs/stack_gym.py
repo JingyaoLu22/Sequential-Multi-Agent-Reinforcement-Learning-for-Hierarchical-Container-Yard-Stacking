@@ -350,7 +350,7 @@ class StackEnv(gym.Env):
             return None
         
         # Randomly select one of the topmost containers
-        rng = np.random.RandomState(self.seed + self.total_timesteps)
+        rng = np.random.RandomState(self.seed)
         selected_idx = rng.choice(topmost_containers)
         
         # Update current retrieval group based on selected container
@@ -371,7 +371,6 @@ class StackEnv(gym.Env):
         bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & (self.yard_state[:, StateIds.ROW.value] == row)
         bay_row_indices = np.where(bay_row_mask)[0]
         
-        occupied_in_stack = self.yard_state[bay_row_indices, StateIds.IS_OCCUPIED.value]
         tiers_in_stack = self.yard_state[bay_row_indices, StateIds.TIER.value]
         
         # Sort by tier to find first unoccupied
