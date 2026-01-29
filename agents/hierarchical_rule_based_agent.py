@@ -14,6 +14,9 @@ class AgentLevel(Enum):
     LOW_LEVEL = 1
 
 class BaseAgent(ABC):
+    """
+    Base class for hierarchical agents using abstract class
+    """
 
     def __init__(self, level: AgentLevel):
         self.level = level
@@ -33,16 +36,23 @@ class BaseAgent(ABC):
         pass
 
 class HighLevelAgent(BaseAgent):
+    """
+    High-Level Agent in the Hierarchical learning framework
+    This agent selects the bay for container placement
+    Currently it receives as input the full observation from environment (maybe changed later)
+    """
 
     def __init__(self, vessel_shape, yard_shape, num_slot_attrs, policy_type ="rule_based"):
         super().__init__(AgentLevel.HIGH_LEVEL)
 
+        # Initialize parameters from environment
         self.vessel_shape = vessel_shape
         self.yard_shape = yard_shape
         self.policy_type = policy_type
         self.num_slot_attrs = num_slot_attrs
         self.episode_history = []
 
+        # Getting total possible slots in vessel and yard (even bays would be ignored later using valid actions only)
         self.num_vessel_bay = vessel_shape[0]//2 + vessel_shape[0]
         self.num_yard_bay = yard_shape[0]//2 + yard_shape[0]
 
@@ -51,6 +61,7 @@ class HighLevelAgent(BaseAgent):
 
 
     def get_action(self, observation, valid_actions):
+        # Select policy based on type
         if self.policy_type == "rule_based":
             return self._rule_based_policy(observation, valid_actions)
         elif self.policy_type == "rule_based_grouped":
@@ -61,27 +72,19 @@ class HighLevelAgent(BaseAgent):
             raise ValueError(f"Unknown policy type: {self.policy_type}")
     
     def _random_policy(self, observation, valid_actions):
+        """
+        Policy select a random bay from valid actions
+        """
         if len(valid_actions) == 0:
             return None
         
+        # Get parsed yard state from observation
         yard_state = self._parse_yard_state(observation)
-        # current_container = self._parse_current_container(observation)
-
-        # max_bay_num = yard_state[:, StateIds.BAY.value].max()
-
+        
+        # Extarct only valid bays using valid actions
         bays_in_valid_actions = yard_state[valid_actions, StateIds.BAY.value]
-        """
-        nearest_bay = current_container[StateIds.BAY.value]
-        allowed_bays = [nearest_bay]
-        if nearest_bay -2 >=1:
-            allowed_bays.append(nearest_bay -2)
-        if nearest_bay +2 <= max_bay_num:
-            allowed_bays.append(nearest_bay +2)
         
-
-        bays_in_valid_actions = [bay for bay in allowed_bays if bay in bays_in_valid_actions]
-        """
-        
+        # Fallback
         if len(bays_in_valid_actions) == 0:
             return None
         
@@ -90,10 +93,13 @@ class HighLevelAgent(BaseAgent):
     def _rule_based_policy(self, observation, valid_actions):
         """
         Select bay with stacks having most similar count of same-group containers (not full)
+        Does not account for grouping similar containers in nearby stacks (bay,row)
         """
+        # Fallback for no valid actions
         if len(valid_actions) == 0:
             return None
         
+        # Get parsed yard state and current container info from observation
         yard_state = self._parse_yard_state(observation)
         current_container = self._parse_current_container(observation)
         container_group = int(current_container[StateIds.GROUP.value])
@@ -101,11 +107,14 @@ class HighLevelAgent(BaseAgent):
         # Get valid bays from valid actions
         valid_bays = set(yard_state[valid_actions, StateIds.BAY.value].astype(int))
         
-        # Get max tier to check if stack is full
+        # Get max tier number possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
         
-        # Build stack info: {(bay, row): {occupied_count, same_group_count}}
+        # Build bay,stack info: {(bay, row): {occupied_count, same_group_count}}
+        # Build bay info: {bay: {occupied_count}}
+        # Getting number of same group containers and total occupied containers in each stack (bay,row)
         stacks_info = {}
+        bays_info = {}
         
         for idx in range(yard_state.shape[0]):
             bay = int(yard_state[idx, StateIds.BAY.value])
@@ -114,41 +123,67 @@ class HighLevelAgent(BaseAgent):
             group = int(yard_state[idx, StateIds.GROUP.value])
             
             stack_key = (bay, row)
+            
             if stack_key not in stacks_info:
                 stacks_info[stack_key] = {'occupied': 0, 'same_group': 0}
             
+            if bay not in bays_info:
+                bays_info[bay] = {'occupied': 0}
+            
             if is_occupied:
+                bays_info[bay]['occupied'] += 1
                 stacks_info[stack_key]['occupied'] += 1
+                
                 if group == container_group:
                     stacks_info[stack_key]['same_group'] += 1
         
         best_bay = None
-        best_bay_score = -1
+        best_bay_score = 0
         
+        # Rule 1 : Select bay with stack having most same-group containers (not full)
         for (bay, row), stack_data in stacks_info.items():
             is_full = stack_data['occupied'] == max_tier
             
             if not is_full and stack_data['same_group'] > best_bay_score and bay in valid_bays:
                 best_bay_score = stack_data['same_group']
                 best_bay = bay
+
         
         
-        if best_bay_score == 0:
+        # Rule 2 : If no bay found in Rule 1, select first bay with available empty stack
+        # This is triggered if no stack having same-group containers is found or if all stacks with same-group containers are full 
+        if best_bay == None:
             for (bay,row), stack_data in stacks_info.items():
                 is_full = stack_data['occupied'] == max_tier
                 is_empty = stack_data['occupied'] == 0
                 if is_empty and bay in valid_bays:
                     best_bay = bay
                     break
+
+        # Rule 3 : If no bay found in Rule 2, select any valid bay with available space
+        if best_bay is None and len(valid_bays) > 0:
+            for bay, bay_data in bays_info.items():
+                if bay in valid_bays and bay_data['occupied'] < (self.yard_shape[StateIds.ROW.value] * max_tier):
+                    best_bay = bay
+                    break 
         
         
         return best_bay
     
     def _rule_based_grouped_policy(self, observation, valid_actions):
+        """
+        Select bay with stacks having most similar count of same-group containers (not full)
+        Uses overall occupancy and grouping within bays to select best bay
+        1. Select bay with stack having most same-group containers (not full)
+        2. If no bay found in Rule 1, select bay with most same-group containers
+        3. If no bay found in Rule 2, select bay with least containers overall
+        """
 
+        # Fallback for no valid actions
         if len(valid_actions) == 0:
             return None
         
+        # Get parsed yard state and current container info from observation
         yard_state = self._parse_yard_state(observation)
         current_container = self._parse_current_container(observation)
         container_group = int(current_container[StateIds.GROUP.value])
@@ -156,10 +191,13 @@ class HighLevelAgent(BaseAgent):
         # Get valid bays from valid actions
         valid_bays = set(yard_state[valid_actions, StateIds.BAY.value].astype(int))
         
-        # Get max tier to check if stack is full
+        # Get max tier number possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
         
-        # Build stack info: {(bay, row): {occupied_count, same_group_count}}
+        # Build stack info: {(bay, row): {occupied_count, same_group_count, different_group_count}}
+        # Build bay info: {bay: {occupied_count, same_group_count, different_group_count}}
+        # Getting number of same group containers, different group containers and total occupied containers in each stack (bay,row) and each bay
+        
         stacks_info = {}
         bay_info = {}
         
@@ -170,65 +208,66 @@ class HighLevelAgent(BaseAgent):
             group = int(yard_state[idx, StateIds.GROUP.value])
             
             stack_key = (bay, row)
-            bay_key = bay
+            
             if stack_key not in stacks_info:
                 stacks_info[stack_key] = {'occupied': 0, 'same_group': 0, 'different_group': 0}
-            if bay_key not in bay_info:
-                bay_info[bay_key] = {'occupied': 0, 'same_group': 0, 'different_group': 0}
+            if bay not in bay_info:
+                bay_info[bay] = {'occupied': 0, 'same_group': 0, 'different_group': 0}
             
             
             if is_occupied:
                 stacks_info[stack_key]['occupied'] += 1
-                bay_info[bay_key]['occupied'] += 1
+                bay_info[bay]['occupied'] += 1
                 if group == container_group:
                     stacks_info[stack_key]['same_group'] += 1
-                    bay_info[bay_key]['same_group'] += 1
+                    bay_info[bay]['same_group'] += 1
                 else:
                     stacks_info[stack_key]['different_group'] += 1
-                    bay_info[bay_key]['different_group'] += 1
+                    bay_info[bay]['different_group'] += 1
         
         best_bay = None
         best_bay_score = 0
-        
+        # Rule 1 : Select bay with stack having most same-group containers (not full)
         for (bay, row), stack_data in stacks_info.items():
+            
             is_full = stack_data['occupied'] == max_tier
             
             if not is_full and stack_data['same_group'] > best_bay_score and bay in valid_bays:
                 best_bay_score = stack_data['same_group']
                 best_bay = bay
         
-        """
-        if best_bay_score == 0:
-            for (bay,row), stack_data in stacks_info.items():
-                is_full = stack_data['occupied'] == max_tier
-                is_empty = stack_data['occupied'] == 0
-                if is_empty and bay in valid_bays:
-                    best_bay = bay
-                    break
-        """
-        #print(f"best_bay before fallback: {best_bay}")
-        
+        # Rule 2 : If no bay found in Rule 1, select bay with most same-group containers overall
+        # If no stack has same-group containers or if all stacks with same-group containers are full
+        # then select bay with mostt empty available slots
         bay_with_most_similar_containers = None
+        
         bay_with_least_containers = None
         least_containers_per_bay_count = np.inf
-        empty_bay = None
+        
         
         if best_bay is None:
+            
             for bay, bay_data in bay_info.items():
-                if bay_data['same_group'] > 0 and bay in valid_bays:
-                    if bay_data['same_group'] > best_bay_score:
-                        best_bay_score = bay_data['same_group']
-                        bay_with_most_similar_containers = bay
+                
+                # Getting bay with most same-group containers
+                if bay in valid_bays and bay_data['same_group'] > best_bay_score:
+                    best_bay_score = bay_data['same_group']
+                    bay_with_most_similar_containers = bay
+                
+                # Getting bay with least containers as fallback
                 if bay_data['occupied'] < least_containers_per_bay_count and bay in valid_bays:
                     least_containers_per_bay_count = bay_data['occupied']
                     bay_with_least_containers = bay
+            
             best_bay = bay_with_most_similar_containers if bay_with_most_similar_containers is not None else bay_with_least_containers
-        
-        #print(f"best_bay after fallback: {best_bay}")
         
         return best_bay
     
     def _parse_yard_state(self, observation):
+        """
+        Takes in full observation vector from environment 
+        and returns yard state in shape (total_yard_coords, num_slot_attrs)
+        """
         observation = observation.astype(int)
         vessel_end = self.total_vessel_coords * self.num_slot_attrs
         yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
@@ -237,6 +276,11 @@ class HighLevelAgent(BaseAgent):
         return yard_state
     
     def _parse_current_container(self, observation):
+        """
+        Takes in full observation vector from environment 
+        and returns state of currently selected container for discharge
+        in shape (num_slot_attrs,)
+        """
         observation = observation.astype(int)
         vessel_end = self.total_vessel_coords * self.num_slot_attrs
         yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
@@ -251,16 +295,23 @@ class HighLevelAgent(BaseAgent):
         })
 
 class LowLevelAgent(BaseAgent):
+    """
+    Low-Level Agent in the Hierarchical learning framework
+    This agent selects the specific slot (row) within the chosen bay for container placement
+    Currently it receives as input the full observation from environment (maybe changed later)
+    """
 
     def __init__(self, vessel_shape, yard_shape, num_slot_attrs, policy_type ="rule_based"):
         super().__init__(AgentLevel.LOW_LEVEL)
 
+        # Initialize parameters from environment
         self.vessel_shape = vessel_shape
         self.yard_shape = yard_shape
         self.policy_type = policy_type
         self.num_slot_attrs = num_slot_attrs
         self.episode_history = []
 
+        # Getting total possible slots in vessel and yard (even bays would be ignored later using valid actions only)
         self.num_vessel_bay = vessel_shape[0]//2 + vessel_shape[0]
         self.num_yard_bay = yard_shape[0]//2 + yard_shape[0]
 
@@ -269,6 +320,7 @@ class LowLevelAgent(BaseAgent):
 
         
     def get_action(self, observation, valid_actions, selected_bay):
+        # Select policy based on type
         if self.policy_type == "rule_based":
             return self._rule_based_policy(observation, valid_actions, selected_bay)
         elif self.policy_type == "rule_based_grouped":
@@ -279,117 +331,139 @@ class LowLevelAgent(BaseAgent):
             raise ValueError(f"Unknown policy type: {self.policy_type}")
         
     def _random_policy(self, observation, valid_actions, selected_bay):
+        """
+        Policy selects a random valid slot (row) within the selected bay
+        """
+        # Fallback for no valid actions
         if len(valid_actions) == 0:
             return None
         
+        # Get parsed yard state from observation
         yard_state = self._parse_yard_state(observation)
 
+        # Selecting only rows that are valid and within selected bay
         bay_mask = yard_state[valid_actions, StateIds.BAY.value] == selected_bay
         bay_valid_actions = np.array(valid_actions)[bay_mask]
 
+        # Fallback for no valid actions in selected bay
         if len(bay_valid_actions) == 0:
             return None
         else:
             return np.random.choice(bay_valid_actions)
 
     def _rule_based_policy(self, observation, valid_actions, selected_bay):
+        """
+        Policy selects the best slot (row) within the selected bay based on count of same-group containers in each stack
+        """
+        
+        # Fallback for no valid actions
         if len(valid_actions) == 0:
             return None
         
+        # Get parsed yard state and current container info from observation
         yard_state = self._parse_yard_state(observation)
         current_container = self._parse_current_container(observation)
         container_group = int(current_container[StateIds.GROUP.value])
 
+        # Mask to get only slots in selected bay
         bay_mask = yard_state[:, StateIds.BAY.value] == selected_bay
         bay_indices = np.where(bay_mask)[0]
 
-        #print(valid_actions)
-
-        #valid_actions = [int(action) for action in valid_actions if action in bay_indices]
         
-
-        #print(valid_actions)
-        #print(bay_indices)
-
-        
-        # Get valid bays from valid actions
-        # valid_bays = set(yard_state[valid_actions, StateIds.BAY.value].astype(int))
-        
-        # Get max tier to check if stack is full
+        # Get max number of tiers possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
         
-        # Build stack info: {(bay, row): {occupied_count, same_group_count}}
+        # Build stack info: {(row): {occupied_count, same_group_count}}
+        # Counting number of same-group containers and occupied slots in each stack (row) within the selected bay
         stacks_info = {}
         
         for idx in bay_indices:
-            #print("Evaluating yard slot:", idx, yard_state[idx])
-            bay = int(yard_state[idx, StateIds.BAY.value])
             row = int(yard_state[idx, StateIds.ROW.value])
             is_occupied = int(yard_state[idx, StateIds.IS_OCCUPIED.value])
             group = int(yard_state[idx, StateIds.GROUP.value])
             
-            stack_key = (bay,row)
-            if stack_key not in stacks_info:
-                stacks_info[stack_key] = {'occupied': 0, 'same_group': 0}
+            
+            if row not in stacks_info:
+                stacks_info[row] = {'occupied': 0, 'same_group': 0}
             
             if is_occupied:
-                stacks_info[stack_key]['occupied'] += 1
+                stacks_info[row]['occupied'] += 1
                 if group == container_group:
-                    stacks_info[stack_key]['same_group'] += 1
+                    stacks_info[row]['same_group'] += 1
         
         best_action = None
-        best_stack_score = -1
+        fallback_best_action = None
+        best_stack_score = 0
         
-        for (bay,row), stack_data in stacks_info.items():
-            #print(f"Evaluating action:", (bay,row), "Stack data:", stack_data)
+        # Rule 1 : Select stack (row) with most same-group containers (not full)
+        for row, stack_data in stacks_info.items():
             is_full = stack_data['occupied'] == max_tier
             is_empty = stack_data['occupied'] == 0
 
             
-            if not is_full and stack_data['same_group'] >= best_stack_score:
+            if not is_full and stack_data['same_group'] > best_stack_score:
                 best_stack_score = stack_data['same_group']
-                best_action = (bay,row)
+                best_action = row
+        
 
-        if best_stack_score == 0:
-            for (bay,row), stack_data in stacks_info.items():
+        # Rule 2 : If no stack found in Rule 1, select first fully empty stack
+        if best_action is None:
+            for row, stack_data in stacks_info.items():
                 is_full = stack_data['occupied'] == max_tier
                 is_empty = stack_data['occupied'] == 0
                 if is_empty:
-                    best_action = (bay,row)
+                    best_action = row
                     break
+                if not is_full :
+                    fallback_best_action = row
         
-        print("Best action (bay,row):", best_action)
-        valid_action_mask = (yard_state[:,StateIds.BAY.value] == best_action[0]) & (yard_state[:,StateIds.ROW.value] == best_action[1])
+
+        # Rule 3 : If no stack found in Rule 2, select any available stack (not full)
+        if best_action is None and fallback_best_action is not None:
+            best_action = fallback_best_action
+        
+        
+        
+        print("Best action (row):", best_action)
+
+        # Get valid action indices (row number of yard_state) for the selected best action (row) within the selected bay
+        valid_action_mask = (yard_state[:,StateIds.BAY.value] == selected_bay) & (yard_state[:,StateIds.ROW.value] == best_action)
         valid_action_indices = np.where(valid_action_mask)[0]
 
-        #print("Valid action indices for best action:", valid_action_indices)
-        #print("Valid actions:", valid_actions)
-
         valid_action_indices = [int(action) for action in valid_action_indices if action in valid_actions]
-        #print(valid_action_indices)
+        
         return valid_action_indices[0]
     
     def _rule_based_grouped_policy(self, observation, valid_actions, selected_bay):
+        """
+        Policy selects the best slot (row) within the selected bay based on multiple rules
+        Objective is to group similar containers together while ensuring spacing between different groups
+        Read individual rules in code comments for better understanding
+        """
+        # Fallback for no valid actions
         if len(valid_actions) == 0:
             return None
         
+        # Get parsed yard state and current container info from observation
         yard_state = self._parse_yard_state(observation)
         current_container = self._parse_current_container(observation)
         container_group = int(current_container[StateIds.GROUP.value])
 
+        # Mask to get only slots in selected bay
         bay_mask = yard_state[:, StateIds.BAY.value] == selected_bay
         bay_indices = np.where(bay_mask)[0]
         
-        # Get max tier to check if stack is full
+        # Get max number of tiers possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
         
-        # Build stack info: {(row): {occupied_count, same_group_count}}
+        # Build stack info: {(row): {occupied_count, same_group_count, different_group_count}}
+        # Counting number of same-group containers, different-group containers and occupied slots in each stack (row) within the selected bay
+        # Also counting total occupied slots in the bay
         stacks_info = {}
         total_occupied_in_bay = 0
         
         for idx in bay_indices:
-            # print("Evaluating yard slot:", idx, yard_state[idx])
-            # bay = int(yard_state[idx, StateIds.BAY.value])
+            
             row = int(yard_state[idx, StateIds.ROW.value])
             is_occupied = int(yard_state[idx, StateIds.IS_OCCUPIED.value])
             group = int(yard_state[idx, StateIds.GROUP.value])
@@ -405,77 +479,102 @@ class LowLevelAgent(BaseAgent):
                     stacks_info[row]['different_group'] += 1
                 total_occupied_in_bay += 1
         
+        # Variables to store best action (row) within selected bay
         best_action = None
         best_stack_score = 0
+        
+        # Variables to store related metadata for further rules
         stack_with_most_similar_containers = None
         count_of_most_similar_containers_in_stack = 0
         empty_rows = []
         
+        # Rule 1 : Select stack (row) with most same-group containers (not full)
         for row, stack_data in stacks_info.items():
-            #print(f"Evaluating action:", (selected_bay,row), "Stack data:", stack_data)
+            
             is_full = stack_data['occupied'] == max_tier
             is_empty = stack_data['occupied'] == 0
 
+            # Getting stack with most same-group containers (not full)
+            if stack_data['same_group'] > best_stack_score and not is_full:
+                best_action = (selected_bay,row)
+                best_stack_score = stack_data['same_group']
             
-            if stack_data['same_group'] > best_stack_score:
-                if not is_full:
-                    best_action = (selected_bay,row)
-                    best_stack_score = stack_data['same_group']
+            # Getting stack with most same-group containers (even if they are full)
             if stack_data['same_group'] > count_of_most_similar_containers_in_stack:
                 count_of_most_similar_containers_in_stack = stack_data['same_group']
                 stack_with_most_similar_containers = row
+            
+            # Collect list of empty rows in the selected bay
             if is_empty:
                 empty_rows.append(row)
 
-        #print(f"Best action at 1st stage (bay,row):", best_action)
-        #print("Empty rows:", empty_rows)
 
+        # Rule 2 : If no stack found in Rule 1 and selected bay is completely empty, select first empty stack
         if best_action is None :
             if total_occupied_in_bay == 0:
                 best_action = (selected_bay, empty_rows[0])
                 
+        # Rule 3 : If no stack found in Rule 2, select first empty stack closest to stack with most same-group containers
         row_list = list(stacks_info.keys())
+        
         if stack_with_most_similar_containers is not None:
+                # Using absolute difference to sort rows based on proximity to stack with most similar containers
                 row_list = sorted(row_list, key=lambda x: abs(x - stack_with_most_similar_containers))
         
         if best_action is None and stack_with_most_similar_containers is not None :
+            
             for row in row_list:
+                
                 stack_data = stacks_info[row]
                 is_full = stack_data['occupied'] == max_tier
                 is_empty = stack_data['occupied'] == 0
+                
+                # Selecting first empty stack closest to stack with most similar containers
                 if not is_full and is_empty:
                     best_action = (selected_bay,row)
                     break
-        #print(f"Best action at 2nd stage (bay,row):", best_action)
         
+        
+        # Rule 4 : If no stack found in Rule 3 (triggered when no same group containers present in selected bay
+        # and multiple empty stacks available in selected bay)
+        # Then select last empty stack among consecutive empty stacks (this ensures spacing between different groups)
+        # Note other options for selceting empty stacks like first empty stack or random empty stack were also considered
+        # but selecting last empty stack in consecutive sequence gave better spacing results in tests
         if best_action is None:
             if len(empty_rows) > 0:
                 best_action = (selected_bay, self._pick_last_sorted(empty_rows))
 
-        #print(f"Best action at 3rd stage (bay,row):", best_action)
 
+        # Rule 5 : If no stack found in Rule 4 (triggered when no empty stacks available in selected bay)
+        # select any available stack that is not full
+        # This is the last fallback option
         if best_action is None:
             for row in row_list:
                 if stacks_info[row]['occupied'] < max_tier:
                     best_action = (selected_bay, row)
                     break
-        #print(f"Best action at final stage (bay,row):", best_action)
+        
             
         
         print("Best action (bay,row):", best_action)
+
+        # Get valid action indices (row number of yard_state) for the selected best action (row) within the selected bay
         valid_action_mask = (yard_state[:,StateIds.BAY.value] == best_action[0]) & (yard_state[:,StateIds.ROW.value] == best_action[1])
         valid_action_indices = np.where(valid_action_mask)[0]
 
-        #print("Valid action indices for best action:", valid_action_indices)
-        #print("Valid actions:", valid_actions)
+        
 
         valid_action_indices = [int(action) for action in valid_action_indices if action in valid_actions]
-        #print(valid_action_indices)
+        
         return valid_action_indices[0]
 
 
     
     def _score_based_policy(self, observation, valid_actions, selected_bay):
+        """
+        Not being used currently but kept for future reference
+        Policy selects the best slot (row) within the selected bay based on scoring function
+        """
 
         if len(valid_actions) == 0:
             return None
@@ -485,6 +584,7 @@ class LowLevelAgent(BaseAgent):
 
         container_group = int(current_container[StateIds.GROUP.value])
 
+        # Filter valid actions to only those in the selected bay
         valid_bay_actions = []
         for action in valid_actions:
             if yard_state[action,StateIds.BAY.value] == selected_bay:
@@ -492,6 +592,7 @@ class LowLevelAgent(BaseAgent):
         
 
 
+        # Get best action based on scoring function
         if len(valid_bay_actions) == 0:
             return None
         else:
@@ -504,32 +605,43 @@ class LowLevelAgent(BaseAgent):
                     max_action_score = group_score
                     best_action = action
             
-            print(f"Low-Level Agent selected action {best_action} in bay {selected_bay} with score {max_action_score}")
+            
             return best_action
         
     def _score_slots(self, action, yard_state, current_container, container_group, selected_bay):
+        """
+        Scoring function to evaluate a slot (row) within a bay for container placement
+        This is used by _score_based_policy() method (curently not in use)
+        The scoring is based on:
+        1. Occupying completely empty stacks is penalized (-0.5)
+        2. Number of same-group containers in the same stack (bay,row) with weightage +/-1
+        3. Number of same-group containers in other stacks in the same bay with weightage (+/-0.25)
+        4. Number of same-group containers in adjacent stacks (bay, row+-1) with weightage (+/-0.5)
+        """
 
         group_score = 0
         bay = yard_state[action,StateIds.BAY.value]
         row = yard_state[action,StateIds.ROW.value]
         tier = yard_state[action,StateIds.TIER.value]
         
-        # Get all occupied slots in same stack
         stack_mask = (yard_state[:,StateIds.BAY.value] == bay) & (yard_state[:,StateIds.ROW.value] == row)
         stack_indices = np.where(stack_mask)[0]
 
         occupied_slots_mask = yard_state[stack_indices, StateIds.IS_OCCUPIED.value] == 1
         occupied_slots = stack_indices[occupied_slots_mask]
 
+        # Penalizing completely empty stacks being occupied by -0.5
         if len(occupied_slots) == 0:
             group_score -= 0.5
         
+        # Scoring based on same-group and different-group containers in the same stack (bay,row) with weightage +/-1
         if len(occupied_slots) > 0:
             stack_container_groups = yard_state[occupied_slots, StateIds.GROUP.value]
             same_group_count = np.sum(stack_container_groups == container_group)
             diff_group_count = np.sum(stack_container_groups != container_group)
             group_score += same_group_count - diff_group_count
         
+        # Getting adjacent rows
         adjacent_rows = []
         if row - 1 >  0:
             adjacent_rows.append(row - 1)
@@ -537,7 +649,7 @@ class LowLevelAgent(BaseAgent):
             adjacent_rows.append(row + 1)
         
         
-        # Check other stacks in same bay (but bot same row or adjacent rows)
+        # Scoring based on same-group and different-group containers in other stacks in the same bay with weightage +/-0.25
         same_bay_mask = (yard_state[:,StateIds.BAY.value] == bay) & (yard_state[:,StateIds.ROW.value] != row) & ~np.isin(yard_state[:,StateIds.ROW.value],adjacent_rows)
         same_bay_indices = np.where(same_bay_mask)[0]
 
@@ -550,7 +662,7 @@ class LowLevelAgent(BaseAgent):
             diff_group_count = np.sum(same_bay_container_groups != container_group)
             group_score += (same_group_count - diff_group_count) * 0.25
 
-        # Check adjacent stacks
+        # Scoring based on same-group and different-group containers in adjacent stacks (bay, row+-1) with weightage +/-0.5
         adj_stack_mask = (yard_state[:,StateIds.BAY.value] == bay) & np.isin(yard_state[:, StateIds.ROW.value], adjacent_rows)
         adj_stack_indices = np.where(adj_stack_mask)[0]
 
@@ -566,28 +678,41 @@ class LowLevelAgent(BaseAgent):
         return group_score
     
     def _pick_last_sorted(self, nums):
-        best_len = curr_len = 1
-        best_last = curr_last = nums[0]
+        """
+        Helper function to pick the last number in the longest consecutive sequence of sorted integers
+        Used to select the last row in empty rows that are consecutive
+        Used in _rule_based_grouped_policy() method to choose the last empty stack among consecutive empty stacks
+        Helps ensure spacing when placing containers in bays that have multiple empty stacks available 
+        """
+        best_len = 1
+        curr_len = 1
+        best_last = nums[0]
+        curr_last = nums[0]
 
         for i in range(1, len(nums)):
+            # Check if current number is consecutive to previous to get consecutive rows in sequence
             if nums[i] == nums[i-1] + 1:
                 curr_len += 1
             else:
                 curr_len = 1
 
+            # Last number in connected consecutive sequence
             curr_last = nums[i]
 
+            # Update longest sequence if current sequence is longer 
+            # and updates last number in that sequence as selected row
             if curr_len > best_len:
                 best_len = curr_len
                 best_last = curr_last
 
         return best_last
 
-
-
-
         
     def _parse_yard_state(self, observation):
+        """
+        Takes in full observation vector from environment 
+        and returns yard state in shape (total_yard_coords, num_slot_attrs)
+        """
         observation = observation.astype(int)
         vessel_end = self.total_vessel_coords * self.num_slot_attrs
         yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
@@ -596,6 +721,10 @@ class LowLevelAgent(BaseAgent):
         return yard_state
     
     def _parse_current_container(self, observation):
+        """
+        Takes in full observation vector from environment 
+        and returns current container state in shape (num_slot_attrs,)
+        """
         observation = observation.astype(int)
         vessel_end = self.total_vessel_coords * self.num_slot_attrs
         yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
@@ -610,6 +739,8 @@ class LowLevelAgent(BaseAgent):
         })
 
 class HierarchicalAgent:
+    """
+    Wrapper class for Hierarchical Agent combining High-Level and Low-Level agents"""
 
     def __init__(self, vessel_shape, yard_shape, num_slot_attrs,
                  high_level_policy_type="rule_based",
@@ -626,12 +757,14 @@ class HierarchicalAgent:
         if len(valid_actions) == 0:
             return None, {"error": "No valid actions available"}
         
+        # High-Level Agent selects bay
         selected_bay = self.high_level_agent.get_action(observation, valid_actions)
 
         if selected_bay is None:
             return valid_actions[0], {"selected_bay": None,
                                         "selected_slot": valid_actions[0]}
         
+        # Low-Level Agent selects slot within the chosen bay
         selected_slot = self.low_level_agent.get_action(observation, valid_actions, 
                             selected_bay)
         
