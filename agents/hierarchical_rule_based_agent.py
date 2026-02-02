@@ -68,6 +68,9 @@ class HighLevelAgent(BaseAgent):
             return self._rule_based_grouped_policy(observation, valid_actions)
         elif self.policy_type == "random":
             return self._random_policy(observation,valid_actions)
+        elif self.policy_type == "rl_agent":
+            # Placeholder for future RL-based high-level agent
+            pass
         else:
             raise ValueError(f"Unknown policy type: {self.policy_type}")
     
@@ -327,6 +330,9 @@ class LowLevelAgent(BaseAgent):
             return self._rule_based_grouped_policy(observation, valid_actions, selected_bay)
         elif self.policy_type == "random":
             return self._random_policy(observation,valid_actions, selected_bay)
+        elif self.policy_type == "rl_agent":
+            # Placeholder for future RL-based low-level agent
+            pass
         else:
             raise ValueError(f"Unknown policy type: {self.policy_type}")
         
