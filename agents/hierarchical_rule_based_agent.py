@@ -430,7 +430,7 @@ class LowLevelAgent(BaseAgent):
         
         
         
-        print("Best action (row):", best_action)
+        #print("Best action (row):", best_action)
 
         # Get valid action indices (row number of yard_state) for the selected best action (row) within the selected bay
         valid_action_mask = (yard_state[:,StateIds.BAY.value] == selected_bay) & (yard_state[:,StateIds.ROW.value] == best_action)
@@ -449,6 +449,9 @@ class LowLevelAgent(BaseAgent):
         # Fallback for no valid actions
         if len(valid_actions) == 0:
             return None
+        
+        #print(f"Selected bay in low-level agent: {selected_bay}")
+        #print(f"Valid actions in low-level agent: {valid_actions}")
         
         # Get parsed yard state and current container info from observation
         yard_state = self._parse_yard_state(observation)
@@ -562,7 +565,10 @@ class LowLevelAgent(BaseAgent):
         
             
         
-        print("Best action (bay,row):", best_action)
+        #print("Best action (bay,row):", best_action)
+
+        if best_action is None:
+            return best_action
 
         # Get valid action indices (row number of yard_state) for the selected best action (row) within the selected bay
         valid_action_mask = (yard_state[:,StateIds.BAY.value] == best_action[0]) & (yard_state[:,StateIds.ROW.value] == best_action[1])

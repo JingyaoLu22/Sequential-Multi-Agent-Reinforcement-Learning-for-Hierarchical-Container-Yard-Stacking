@@ -39,9 +39,12 @@ class StackEnv(gym.Env):
         self.num_containers = config.get("num_containers", 4)
         self.group_num = config.get("group_num", 1)
         self.group_placement = config.get("group_placement", "fixed")
-        self.seed = config.get("seed", 0)
+        self.seed = config.get("seed")
         self.action_mask = config.get("action_mask", "default")
-        self.reward_scheme = config.get("reward_scheme", "progress")
+        self.reward_scheme = config.get("reward_scheme", "default")
+
+        if self.seed is None:
+            self.seed = np.random.randint(0, 10000)
         
         # Calculate total physical slots
         self.total_vessel_slots = self.vessel_shape[0] * self.vessel_shape[1] * self.vessel_shape[2]
@@ -56,6 +59,8 @@ class StackEnv(gym.Env):
             )
         self.num_slot_attrs = 5
 
+        self.num_actions = self.yard_shape[0] * self.yard_shape[1]  # num_bays * num_rows
+
         # Calculate total coordinates (used later for numbering and removing even numbered bays)
         self.num_vessel_bay = self.vessel_shape[0] // 2 + self.vessel_shape[0]
         self.num_yard_bay = self.yard_shape[0] // 2 + self.yard_shape[0]
@@ -63,7 +68,7 @@ class StackEnv(gym.Env):
         self.total_vessel_coords = self.num_vessel_bay * self.vessel_shape[1] * self.vessel_shape[2]
         self.total_yard_coords = self.num_yard_bay * self.yard_shape[1] * self.yard_shape[2]
         
-        self.obs_coords = self.total_vessel_coords + self.total_yard_coords + 1  # +1 for current target
+        self.obs_coords = self.total_yard_coords + 1  # yard_state + current container (no vessel_state)
 
         # Sequencer
         self.current_vessel_container = None  # Index of container currently being retrieved
@@ -74,16 +79,16 @@ class StackEnv(gym.Env):
         self.yard_bay_row_occupied = set()
 
         # Observation and action spaces
-        # Maximum for observation space based on various yard, vessel and container attributes
+        # Maximum for observation space based on yard and container attributes (vessel_state excluded)
         # shape=(self.obs_coords, 5). Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
         observation_space = gym.spaces.Box(
             low=0,
             high=max(
-                max(self.num_vessel_bay, self.num_yard_bay),    # bay upper limit
-                max(self.vessel_shape[1], self.yard_shape[1]),  # row upper limit
-                max(self.vessel_shape[2], self.yard_shape[2]),  # tier upper limit
-                1,                                              # is_occupied upper limit
-                self.group_num,                                 # group number upper limit
+                self.num_yard_bay,      # bay upper limit
+                self.yard_shape[1],     # row upper limit
+                self.yard_shape[2],     # tier upper limit
+                1,                      # is_occupied upper limit
+                self.group_num,         # group number upper limit
             ),
             shape=(self.obs_coords * self.num_slot_attrs,),
             dtype=np.int64,
@@ -94,12 +99,14 @@ class StackEnv(gym.Env):
             self.observation_space = gym.spaces.Dict(
                 {
                     "observation": observation_space,
-                    "mask": gym.spaces.Box(low=0, high=1, shape=(self.total_yard_coords,), dtype=np.bool_),
+                    "mask": gym.spaces.Box(low=0, high=1, shape=(self.num_actions,), dtype=np.bool_),
                 }
             )
 
-        # Action is choosing a yard slot to place the current vessel container
-        self.action_space = gym.spaces.Discrete(self.total_yard_coords)
+        # Action is choosing a yard (bay, row) to place the current vessel container
+        # Action index x = ((b-1)/2)*n + (r-1) where b is odd bay number (1,3,5,...), r is row (1,2,3,...), n is num_rows
+        
+        self.action_space = gym.spaces.Discrete(self.num_actions)
 
         # Render part
         self.render_mode = render_mode
@@ -109,9 +116,74 @@ class StackEnv(gym.Env):
         self.screen_height = 60 * max(self.vessel_shape[2], self.yard_shape[2]) + 150
         self.screen = None
 
+    def _action_to_bay_row(self, action):
+        """
+        Convert action index to (bay, row) pair
+        Action index x = ((b-1)/2)*n + (r-1)
+        where b is odd bay number (1,3,5,...), r is row number (1,2,...,n), n is num_rows
+        
+        Returns:
+            tuple: (bay, row) where bay is odd bay number (1,3,5,...) and row is 1-indexed
+        """
+        n = self.yard_shape[1]  # num_rows
+        bay_idx = action // n  # which physical bay (0-indexed)
+        row_idx = action % n   # which row (0-indexed)
+        
+        # Convert to actual bay number (1,3,5,7,...)
+        bay = 2 * bay_idx + 1
+        row = row_idx + 1
+        
+        return bay, row
+    
+    def _bay_row_to_action(self, bay, row):
+        """
+        Convert (bay, row) pair to action index
+        Action index x = ((b-1)/2)*n + (r-1)
+        
+        Args:
+            bay: odd bay number (1,3,5,7,...)
+            row: row number (1,2,3,...)
+        
+        Returns:
+            int: action index
+        """
+        n = self.yard_shape[1]  # num_rows
+        action = ((bay - 1) // 2) * n + (row - 1)
+        return action
+    
+    def _action_to_yard_slot(self, action):
+        """
+        Convert action index to yard_slot index (for accessing yard_state)
+        Finds the lowest unoccupied tier in the specified (bay, row) stack
+        
+        Returns:
+            int: yard_slot index in yard_state, or None if stack is full
+        """
+        bay, row = self._action_to_bay_row(action)
+        
+        # Find all slots matching this bay and row
+        bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & \
+                       (self.yard_state[:, StateIds.ROW.value] == row)
+        bay_row_indices = np.where(bay_row_mask)[0]
+        
+        if len(bay_row_indices) == 0:
+            return None
+        
+        # Find lowest unoccupied tier
+        tiers_in_stack = self.yard_state[bay_row_indices, StateIds.TIER.value]
+        sorted_indices = np.argsort(tiers_in_stack)
+        
+        for idx in sorted_indices:
+            slot_idx = bay_row_indices[idx]
+            if self.yard_state[slot_idx, StateIds.IS_OCCUPIED.value] == 0:
+                return slot_idx
+        
+        return None  # Stack is full
+
     def step(self, action):
         """
-        Execute one step: place current container from vessel to yard at a specified action (yard slot index)
+        Execute one step: place current container from vessel to yard at a specified action (bay, row combination)
+        Action represents a (bay, row) pair where the container will be placed at the lowest available tier.
         """
         self.total_timesteps += 1  
         truncated = False
@@ -122,19 +194,28 @@ class StackEnv(gym.Env):
         valid_actions_list = valid_actions.tolist() if isinstance(valid_actions, np.ndarray) else list(valid_actions)
 
         # Check if action is valid (in valid_actions list)
-        # Invalid action (either occupied slot, even bay, not bottommost tier, or out of range slot number)
-        # Invlalid actions do not change the environment and incur a large negative reward (-100)
-        # May need to modify this later based on how action masking is implemented in hrl
-        if action not in valid_actions_list:
-            reward = -100.0
+        # Invalid action (either full stack, even bay, or out of range action number)
+        # Invalid actions lead to huge negative reward and termination of episode
+        if action is None or action not in valid_actions_list:
+            reward = -200.0
             observation = self._create_observation()
             info["yard_mask"] = valid_actions_list
-            terminated = False
+            terminated = True
+            return observation, reward, terminated, truncated, info
+
+        # Convert action to yard_slot (actual slot index in yard_state)
+        yard_slot = self._action_to_yard_slot(action)
+        if yard_slot is None:
+            # This shouldn't happen if action masking works correctly
+            reward = -200.0
+            observation = self._create_observation()
+            info["yard_mask"] = valid_actions_list
+            terminated = True
             return observation, reward, terminated, truncated, info
 
         # Check if placement bay is adjacent to vessel container's bay
         vessel_container_bay = self.vessel_state[self.current_vessel_container, StateIds.BAY.value]
-        yard_placement_bay = self.yard_state[action, StateIds.BAY.value]
+        yard_placement_bay = self.yard_state[yard_slot, StateIds.BAY.value]
         
         # Container can only be placed in same bay or adjacent bays (left/right) (REMOVING THIS FOR NOW AS PER DISCUSSION)
         # Huge negative reward if agent tries to place container in non-adjacent bay.
@@ -148,10 +229,10 @@ class StackEnv(gym.Env):
             # return observation, reward, terminated, truncated, info
 
         # Calculate reward
-        reward = self._calculate_reward(action)
+        reward = self._calculate_reward(yard_slot)
 
         # Place container in yard
-        self._place_container_in_yard(action, self.current_vessel_container)
+        self._place_container_in_yard(yard_slot, self.current_vessel_container)
 
         # Remove container from vessel
         self.vessel_state[self.current_vessel_container, StateIds.IS_OCCUPIED.value] = 0
@@ -176,6 +257,10 @@ class StackEnv(gym.Env):
 
     def reset(self, seed=None, **kwargs):
         """Reset environment wrapper"""
+        if seed is not None:
+            self.seed = seed
+        else:
+            self.seed = np.random.randint(0, 10000)
         self._reset()
         observation = self._create_observation()
         info = {}
@@ -350,7 +435,7 @@ class StackEnv(gym.Env):
             return None
         
         # Randomly select one of the topmost containers
-        rng = np.random.RandomState(self.seed)
+        rng = np.random.RandomState(self.seed + self.total_timesteps)
         selected_idx = rng.choice(topmost_containers)
         
         # Update current retrieval group based on selected container
@@ -400,6 +485,8 @@ class StackEnv(gym.Env):
         3. Reward (+0.25/-0.25) for placing container having same/dissimilar containers in other stacks in same bay (not same row or adjacent rows)
         
         1,2 and 3 rewards are added for each similar/dissimilar container found in the same stack or adjacent rows.
+        Note : Simple reward scheme only applies rule 1.
+        
         """
         placement_bay = self.yard_state[yard_action, StateIds.BAY.value]
         placement_row = self.yard_state[yard_action, StateIds.ROW.value]
@@ -424,6 +511,9 @@ class StackEnv(gym.Env):
             same_group_count = np.sum(same_stack_container_groups == container_group)
             diff_group_count = np.sum(same_stack_container_groups != container_group)
             reward += (same_group_count - diff_group_count) * 1.0
+
+        if self.reward_scheme == "simple_single_stack":
+            return reward
 
         # Find  +/- 1 adjacent rows in the same bay
         adjacent_rows = []
@@ -470,7 +560,9 @@ class StackEnv(gym.Env):
 
     def _get_valid_yard_actions(self) -> np.ndarray:
         """
-        Get valid yard placement slots - only bottommost unoccupied tier stack in odd bays
+        Get valid yard placement actions - returns action indices for (bay, row) combinations
+        that have at least one unoccupied tier in odd bays.
+        Action index x = ((b-1)/2)*n + (r-1) where b is odd bay, r is row, n is num_rows
         """
         if self.current_vessel_container is None:
             return np.array([], dtype=int)
@@ -490,17 +582,13 @@ class StackEnv(gym.Env):
         # Find unique (bay, row) combinations from valid slots
         bays = self.yard_state[valid_indices, StateIds.BAY.value]
         rows = self.yard_state[valid_indices, StateIds.ROW.value]
-        tiers = self.yard_state[valid_indices, StateIds.TIER.value]
         
         unique_bay_rows = set(zip(bays, rows))
         
-        # For each (bay, row), find the lowest unoccupied tier
+        # Convert each (bay, row) to action index
         for bay, row in unique_bay_rows:
-            mask = (bays == bay) & (rows == row)
-            indices_in_slot = valid_indices[mask]
-            tiers_in_slot = tiers[mask]
-            min_tier_idx = np.argmin(tiers_in_slot)
-            valid_actions.append(indices_in_slot[min_tier_idx])
+            action = self._bay_row_to_action(bay, row)
+            valid_actions.append(action)
         
         return np.array(valid_actions, dtype=int)
 
@@ -518,14 +606,14 @@ class StackEnv(gym.Env):
         """
         Create flattened observation vector
         Observation vector consists of: 
-        1. vessel state (total_vessel_coords i.e. number of vessel slots), 
-        2. yard state (total_vessel_coords i.e. number of yard slots) 
-        3. Current vessel selected container state (1).
-        Therefore, obs_coords = total_vessel_coords + total_yard_coords + 1
+        1. yard state (total_yard_coords i.e. number of yard slots) 
+        2. Current vessel selected container state (1).
+        Therefore, obs_coords = total_yard_coords + 1
         Each slot has 5 attributes (num_slot_attrs): bay, row, tier, is_occupied(0/1), group number of container
         Final flattened observation shape: (obs_coords * num_slot_attrs,)
         """
-        state = np.concatenate((self.vessel_state, self.yard_state), axis=0)
+        # Start with yard_state only (vessel_state excluded)
+        state = self.yard_state.copy()
         if self.current_vessel_container is not None:
             state = np.concatenate((state, self.vessel_state[self.current_vessel_container].reshape(1, -1)), axis=0)
         else:
