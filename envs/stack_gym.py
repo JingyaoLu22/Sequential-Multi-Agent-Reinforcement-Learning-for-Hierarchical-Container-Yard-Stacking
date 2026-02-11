@@ -476,7 +476,7 @@ class StackEnv(gym.Env):
             self.yard_state[:, StateIds.ROW.value] == row
         )
         bay_row_indices = np.where(bay_row_mask)[0]
-
+        
         tiers_in_stack = self.yard_state[bay_row_indices, StateIds.TIER.value]
 
         # Sort by tier to find first unoccupied
