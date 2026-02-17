@@ -19,7 +19,7 @@ class StackEnv(gym.Env):
     Stacking Environment for moving containers from vessel to yard
     
     Containers start fully loaded on the vessel. Environment selects containers sequentially and randomly
-    from the vessel (top containers in each stack) at each time step and the agent is tasjed with selecting a slot for
+    from the vessel (top containers in each stack) at each time step and the agent is tasked with selecting a slot for
     the container in the yard. The goal is to:
     1. Place similar-group containers close together
     2. Avoid placing dissimilar containers close together
@@ -42,6 +42,7 @@ class StackEnv(gym.Env):
         self.seed = config.get("seed")
         self.action_mask = config.get("action_mask", "default")
         self.reward_scheme = config.get("reward_scheme", "default")
+        self.observation_type = config.get("observation_type", "flat")
 
         if self.seed is None:
             self.seed = np.random.randint(0, 10000)
@@ -81,18 +82,8 @@ class StackEnv(gym.Env):
         # Observation and action spaces
         # Maximum for observation space based on yard and container attributes (vessel_state excluded)
         # shape=(self.obs_coords, 5). Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
-        observation_space = gym.spaces.Box(
-            low=0,
-            high=max(
-                self.num_yard_bay,      # bay upper limit
-                self.yard_shape[1],     # row upper limit
-                self.yard_shape[2],     # tier upper limit
-                1,                      # is_occupied upper limit
-                self.group_num,         # group number upper limit
-            ),
-            shape=(self.obs_coords * self.num_slot_attrs,),
-            dtype=np.int64,
-        )
+        observation_space = self._get_observation_space()
+        
         if self.action_mask == "default":
             self.observation_space = observation_space
         else:
@@ -493,10 +484,16 @@ class StackEnv(gym.Env):
         container_group = self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
         
         reward = 0.0
+
+        rule_0_multiplier = 0.5
+        rule_1_multiplier = 20.0
+
+        rule_2_multiplier = 10.0
+        rule_3_multiplier = 2.0
         
         # Rule 0: Penalty for occupying new ground slot in unoccupied stack (REMOVING THIS FOR NOW AS PER DISCUSSION)
-        # if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
-            # reward -= 0.5
+        if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
+            reward -= (rule_0_multiplier)
         
         # Rule 1: Reward/penalty for placing container in a stack having same/dissimilar containers in the same stack.
         bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & \
@@ -510,7 +507,7 @@ class StackEnv(gym.Env):
             same_stack_container_groups = self.yard_state[same_stack_occupied_slots, StateIds.GROUP.value]
             same_group_count = np.sum(same_stack_container_groups == container_group)
             diff_group_count = np.sum(same_stack_container_groups != container_group)
-            reward += (same_group_count - diff_group_count) * 1.0
+            reward += (same_group_count - diff_group_count) * rule_1_multiplier
 
         if self.reward_scheme == "simple_single_stack":
             return reward
@@ -537,7 +534,7 @@ class StackEnv(gym.Env):
             same_bay_container_groups = self.yard_state[same_bay_occupied_slots, StateIds.GROUP.value]
             same_group_count = np.sum(same_bay_container_groups == container_group)
             diff_group_count = np.sum(same_bay_container_groups != container_group)
-            reward += (same_group_count - diff_group_count) * 0.25
+            reward += (same_group_count - diff_group_count) * rule_3_multiplier
 
         # Rule 2 reward/penalty for adjacent rows in same bay
         adj_stack_mask = (self.yard_state[:,StateIds.BAY.value] == placement_bay) & \
@@ -551,7 +548,7 @@ class StackEnv(gym.Env):
             adj_stack_container_groups = self.yard_state[adj_occupied_slots, StateIds.GROUP.value]
             same_group_count = np.sum(adj_stack_container_groups == container_group)
             diff_group_count = np.sum(adj_stack_container_groups != container_group)
-            reward += (same_group_count - diff_group_count) * 0.5
+            reward += (same_group_count - diff_group_count) * rule_2_multiplier
 
         
 
@@ -602,29 +599,269 @@ class StackEnv(gym.Env):
         valid_actions = self._get_valid_yard_actions()
         return [action in valid_actions for action in range(self.action_space.n)]
 
+    def _get_observation_space(self):
+        """
+        Get observation space based on observation_type
+        Returns appropriate gym.spaces.Box for the specified observation type
+        """
+        if self.observation_type == "flat":
+            # Original flat observation space
+            return gym.spaces.Box(
+                low=0,
+                high=max(
+                    self.num_yard_bay,      # bay upper limit
+                    self.yard_shape[1],     # row upper limit
+                    self.yard_shape[2],     # tier upper limit
+                    1,                      # is_occupied upper limit
+                    self.group_num,         # group number upper limit
+                ),
+                shape=(self.obs_coords * self.num_slot_attrs,),
+                dtype=np.int64,
+            )
+        elif self.observation_type == "stack_features":
+            # Stack-based feature observation space
+            # Features per stack: group_counts(group_num) + num_occupied(1) + num_empty(1) + 
+            #                     current_group_onehot(group_num) + left_max_group_onehot(group_num) + 
+            #                     right_max_group_onehot(group_num) + vessel_remaining_per_group(group_num) +
+            #                     is_empty(1) + has_remaining_slots(1) + positional_index(1)
+            features_per_stack = 5 * self.group_num + 5
+            num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
+            
+            return gym.spaces.Box(
+                low=0,
+                high=max(
+                    self.yard_shape[2],     # max count per group in a stack
+                    num_stacks,             # positional index upper limit
+                    1,                      # binary features upper limit
+                ),
+                shape=(num_stacks * features_per_stack,),
+                dtype=np.float32,
+            )
+        elif self.observation_type == "flat_parsed":
+            # Dictionary observation for rule-based agents
+            # Returns pre-parsed yard_state and current_container as separate arrays
+            return gym.spaces.Dict({
+                "yard_state": gym.spaces.Box(
+                    low=0,
+                    high=max(
+                        self.num_yard_bay,      # bay upper limit
+                        self.yard_shape[1],     # row upper limit
+                        self.yard_shape[2],     # tier upper limit
+                        1,                      # is_occupied upper limit
+                        self.group_num,         # group number upper limit
+                    ),
+                    shape=(self.total_yard_coords, self.num_slot_attrs),
+                    dtype=np.int64,
+                ),
+                "current_container": gym.spaces.Box(
+                    low=0,
+                    high=max(
+                        self.num_yard_bay,      # bay upper limit
+                        self.yard_shape[1],     # row upper limit
+                        self.yard_shape[2],     # tier upper limit
+                        1,                      # is_occupied upper limit
+                        self.group_num,         # group number upper limit
+                    ),
+                    shape=(self.num_slot_attrs,),
+                    dtype=np.int64,
+                )
+            })
+        else:
+            raise ValueError(f"Unknown observation_type: {self.observation_type}")
+
+    def _create_stack_features(self):
+        """
+        Transform yard_state into stack-based features
+        
+        For each stack (bay, row combination), computes:
+        - count_group1, count_group2, ..., count_groupn: counts of each group in the stack
+        - num_occupied: number of occupied slots in the stack
+        - num_empty: number of empty slots in the stack
+        - current_group (1-hot): one-hot encoding of current container's group
+        - left_row_max_group (1-hot): one-hot encoding of dominant group in left adjacent row (same bay)
+        - right_row_max_group (1-hot): one-hot encoding of dominant group in right adjacent row (same bay)
+        - is_empty: 1 if stack is completely empty, 0 otherwise
+        - has_remaining_slots: 1 if stack has at least one empty slot, 0 otherwise
+        - positional_index: sequential index of the stack (0, 1, 2, ...)
+        
+        Returns:
+            np.ndarray: Feature vector for all stacks
+        """
+        # Get unique stacks (bay, row combinations) - only odd bays
+        yard_bays = np.unique(self.yard_state[:, StateIds.BAY.value])
+        yard_bays = yard_bays[yard_bays % 2 == 1]  # only odd bays
+        yard_rows = np.arange(1, self.yard_shape[1] + 1)
+        
+        num_stacks = len(yard_bays) * len(yard_rows)
+        features_per_stack = 5 * self.group_num + 5
+        stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
+        
+        # Get current container group
+        current_group = -1
+        if self.current_vessel_container is not None:
+            current_group = int(self.vessel_state[self.current_vessel_container, StateIds.GROUP.value])
+        
+        # Calculate remaining containers per group in vessel (excluding group 0)
+        vessel_group_counts = np.zeros(self.group_num, dtype=np.float32)
+        vessel_occupied_mask = self.vessel_state[:, StateIds.IS_OCCUPIED.value] == 1
+        vessel_occupied_slots = self.vessel_state[vessel_occupied_mask]
+        for group in range(1, self.group_num + 1):
+            vessel_group_counts[group - 1] = np.sum(vessel_occupied_slots[:, StateIds.GROUP.value] == group)
+        
+        stack_idx = 0
+        for bay in yard_bays:
+            for row in yard_rows:
+                # Find all slots in this stack
+                stack_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & \
+                            (self.yard_state[:, StateIds.ROW.value] == row)
+                stack_slots = self.yard_state[stack_mask]
+                
+                feature_idx = 0
+                
+                # Count each group in this stack (excluding group 0 as it indicates unoccupied)
+                for group in range(1, self.group_num + 1):
+                    group_mask = (stack_slots[:, StateIds.IS_OCCUPIED.value] == 1) & \
+                                (stack_slots[:, StateIds.GROUP.value] == group)
+                    stack_features[stack_idx, feature_idx] = np.sum(group_mask)
+                    feature_idx += 1
+                
+                # num_occupied
+                num_occupied = np.sum(stack_slots[:, StateIds.IS_OCCUPIED.value])
+                stack_features[stack_idx, feature_idx] = num_occupied
+                feature_idx += 1
+                
+                # num_empty
+                num_empty = len(stack_slots) - num_occupied
+                stack_features[stack_idx, feature_idx] = num_empty
+                feature_idx += 1
+                
+                # current_group (one-hot) - excluding group 0
+                if current_group >= 1:
+                    stack_features[stack_idx, feature_idx + (current_group - 1)] = 1.0
+                feature_idx += self.group_num
+                
+                # left_row_max_group (one-hot) - left adjacent row in same bay
+                left_row = row - 1
+                if left_row >= 1:
+                    left_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & \
+                               (self.yard_state[:, StateIds.ROW.value] == left_row) & \
+                               (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                    left_groups = self.yard_state[left_mask, StateIds.GROUP.value]
+                    if len(left_groups) > 0:
+                        # Find most common group in left row (excluding group 0)
+                        left_groups_valid = left_groups[left_groups > 0]
+                        if len(left_groups_valid) > 0:
+                            left_max_group = np.bincount(left_groups_valid.astype(int)).argmax()
+                            if left_max_group >= 1:
+                                stack_features[stack_idx, feature_idx + (left_max_group - 1)] = 1.0
+                feature_idx += self.group_num
+                
+                # right_row_max_group (one-hot) - right adjacent row in same bay
+                right_row = row + 1
+                if right_row <= self.yard_shape[1]:
+                    right_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & \
+                                (self.yard_state[:, StateIds.ROW.value] == right_row) & \
+                                (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                    right_groups = self.yard_state[right_mask, StateIds.GROUP.value]
+                    if len(right_groups) > 0:
+                        # Find most common group in right row (excluding group 0)
+                        right_groups_valid = right_groups[right_groups > 0]
+                        if len(right_groups_valid) > 0:
+                            right_max_group = np.bincount(right_groups_valid.astype(int)).argmax()
+                            if right_max_group >= 1:
+                                stack_features[stack_idx, feature_idx + (right_max_group - 1)] = 1.0
+                feature_idx += self.group_num
+                
+                # vessel_remaining_per_group (count of remaining containers per group in vessel)
+                stack_features[stack_idx, feature_idx:feature_idx + self.group_num] = vessel_group_counts
+                feature_idx += self.group_num
+                
+                # is_empty
+                stack_features[stack_idx, feature_idx] = 1.0 if num_occupied == 0 else 0.0
+                feature_idx += 1
+                
+                # has_remaining_slots
+                stack_features[stack_idx, feature_idx] = 1.0 if num_empty > 0 else 0.0
+                feature_idx += 1
+                
+                # positional_index
+                stack_features[stack_idx, feature_idx] = stack_idx
+                
+                stack_idx += 1
+        
+        return stack_features.flatten()
+
     def _create_observation(self):
         """
-        Create flattened observation vector
-        Observation vector consists of: 
-        1. yard state (total_yard_coords i.e. number of yard slots) 
-        2. Current vessel selected container state (1).
-        Therefore, obs_coords = total_yard_coords + 1
-        Each slot has 5 attributes (num_slot_attrs): bay, row, tier, is_occupied(0/1), group number of container
-        Final flattened observation shape: (obs_coords * num_slot_attrs,)
-        """
-        # Start with yard_state only (vessel_state excluded)
-        state = self.yard_state.copy()
-        if self.current_vessel_container is not None:
-            state = np.concatenate((state, self.vessel_state[self.current_vessel_container].reshape(1, -1)), axis=0)
-        else:
-            state = np.concatenate((state, np.zeros((1, 5), dtype=int)), axis=0)
-        state = state.flatten()
+        Create observation based on observation_type
         
-        if self.action_mask == "default":
-            return state
+        observation_type options:
+        - "flat": Original flattened observation vector (yard_state + current container)
+        - "stack_features": Stack-based feature representation
+        - "flat_parsed": Dictionary with separate yard_state and current_container arrays
+        
+        For "flat":
+            Observation vector consists of: 
+            1. yard state (total_yard_coords i.e. number of yard slots) 
+            2. Current vessel selected container state (1).
+            Therefore, obs_coords = total_yard_coords + 1
+            Each slot has 5 attributes (num_slot_attrs): bay, row, tier, is_occupied(0/1), group number of container
+            Final flattened observation shape: (obs_coords * num_slot_attrs,)
+        
+        For "stack_features":
+            Each stack has features: [group_counts, num_occupied, num_empty, current_group_onehot,
+                                     left_row_max_group_onehot, right_row_max_group_onehot, 
+                                     is_empty, has_remaining_slots, positional_index]
+        
+        For "flat_parsed":
+            Dictionary with:
+            - "yard_state": 2D array (total_yard_coords, num_slot_attrs)
+            - "current_container": 1D array (num_slot_attrs,)
+        
+        """
+        mask = self.action_masks() if self.action_mask != "default" else None
+        
+        if self.observation_type == "flat":
+            # Original flat observation
+            state = self.yard_state.copy()
+            if self.current_vessel_container is not None:
+                state = np.concatenate((state, self.vessel_state[self.current_vessel_container].reshape(1, -1)), axis=0)
+            else:
+                state = np.concatenate((state, np.zeros((1, 5), dtype=int)), axis=0)
+            state = state.flatten()
+            
+            if self.action_mask == "default":
+                return state
+            else:
+                return {"observation": state, "mask": mask}
+        
+        elif self.observation_type == "stack_features":
+            # Stack-based feature observation
+            stack_features = self._create_stack_features()
+            
+            if self.action_mask == "default":
+                return stack_features
+            else:
+                return {"observation": stack_features, "mask": mask}
+        
+        elif self.observation_type == "flat_parsed":
+            # Dictionary observation for rule-based agents
+            # Returns pre-parsed yard_state and current_container
+            yard_state = self.yard_state.copy()
+            
+            if self.current_vessel_container is not None:
+                current_container = self.vessel_state[self.current_vessel_container].copy()
+            else:
+                current_container = np.zeros(self.num_slot_attrs, dtype=np.int64)
+            
+            # Note: flat_parsed is intended for rule-based agents, so no mask is returned
+            return {
+                "yard_state": yard_state,
+                "current_container": current_container
+            }
+        
         else:
-            mask = self.action_masks()
-            return {"observation": state, "mask": mask}
+            raise ValueError(f"Unknown observation_type: {self.observation_type}")
 
     def render(self):
         """
