@@ -65,7 +65,7 @@ class HighLevelAgent(BaseAgent):
 
     def _action_to_bay_row(self, action):
         """
-        Convert action index to (bay, row) pair
+        Convert action index (stack) to bay and row numbering
         Action index x = ((b-1)/2)*n + (r-1)
         where b is odd bay number (1,3,5,...), r is row number (1,2,...,n), n is num_rows
         
@@ -84,7 +84,7 @@ class HighLevelAgent(BaseAgent):
     
     def _bay_row_to_action(self, bay, row):
         """
-        Convert (bay, row) pair to action index
+        Convert (bay, row) numbering pair to action index (stack)
         Action index x = ((b-1)/2)*n + (r-1)
         
         Args:
@@ -412,7 +412,7 @@ class LowLevelAgent(BaseAgent):
 
     def _action_to_bay_row(self, action):
         """
-        Convert action index to (bay, row) pair
+        Convert action index (stack) to bay and row numbering
         Action index x = ((b-1)/2)*n + (r-1)
         where b is odd bay number (1,3,5,...), r is row number (1,2,...,n), n is num_rows
         
@@ -431,15 +431,15 @@ class LowLevelAgent(BaseAgent):
     
     def _bay_row_to_action(self, bay: int, row: int) -> int:
         """
-        Convert (bay, row) pair to action index
+        Convert (bay, row) numbering pair to action index (stack)
         Action index x = ((b-1)/2)*n + (r-1)
         
         Args:
-            bay: Odd bay number (1,3,5,7,...)
-            row: Row number (1,2,3,...)
+            bay: odd bay number (1,3,5,7,...)
+            row: row number (1,2,3,...)
         
         Returns:
-            Action index
+            int: action index
         """
         n = self.yard_shape[StateIds.ROW.value]  # num_rows
         action = ((bay - 1) // 2) * n + (row - 1)

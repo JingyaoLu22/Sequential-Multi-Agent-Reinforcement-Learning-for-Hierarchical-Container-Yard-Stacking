@@ -1,7 +1,7 @@
 import warnings
 import numpy as np
 import gymnasium as gym
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List, Any, Union
 from enum import Enum
 import colorsys
 
@@ -20,17 +20,62 @@ class StackEnv(gym.Env):
     
     Containers start fully loaded on the vessel. Environment selects containers sequentially and randomly
     from the vessel (top containers in each stack) at each time step and the agent is tasked with selecting a slot for
-    the container in the yard. The goal is to:
-    1. Place similar-group containers close together
-    2. Avoid placing dissimilar containers close together
-    3. Optimize yard usage by reusing bays (penalty for placing containers in previously empty stacks)
+    the container in the yard. The goal is to place similar-group containers close together.
     """
     
     metadata = {
         "render_modes": ["rgb_array"],
     }
 
-    def __init__(self, config: Dict = None, render_mode: Optional[str] = None):
+    def __init__(self, config: Optional[Dict] = None, render_mode: Optional[str] = None) -> None:
+        """
+        Initialize the stacking environment.
+        
+        Args:
+            config: Configuration dictionary with the following keys:
+                - vessel_shape: (bays, rows, tiers) dimensions of vessel storage
+                - yard_shape: (bays, rows, tiers) dimensions of yard storage
+                - num_containers: Total containers to move from vessel to yard
+                - group_num: Number of distinct container groups
+                - group_placement: Strategy for container group placement ("fixed" or "random")
+                - seed: Random seed for reproducibility
+                - action_mask: Action masking strategy
+                - reward_scheme: Reward calculation scheme ("default")
+                - observation_type: Observation format ("flat")
+            render_mode: Rendering mode for visualization ("rgb_array")
+        
+        Attributes:
+            vessel_shape: Vessel storage dimensions tuple
+            yard_shape: Yard storage dimensions tuple
+            num_containers: Number of containers to place
+            group_num: Number of container groups
+            group_placement: Container group placement strategy (fixed or random)
+            seed: Random seed value
+            action_mask_with_obs: If set this returns action_mask along with observation. (not used currently but maybe needed later)
+            reward_scheme: Reward calculation scheme (default or simple_single_stack)
+            observation_type: State observation format (details in _create_observation method)
+            total_vessel_slots: Total container slots in vessel
+            total_yard_slots: Total container slots in yard
+            total_timesteps: Current episode timestep counter
+            total_containers_remaining: Containers pending placement
+            num_slot_attrs: Attributes per slot state (always 5)
+            num_actions: Number of discrete actions. Each action corresponds to a single stack in the yard (bay x row).
+            num_vessel_bay: Total bays in vessel (including even bays that are not used for placement)
+            num_yard_bay: Total bays in yard (including even bays that are not used for placement)
+            total_vessel_coords: Total coordinates in vessel state (including even bays that are not used for placement)
+            total_yard_coords: Total coordinates in yard state (including even bays that are not used for placement)
+            obs_coords: Size of observation space coordinates (including even bays that are not used for placement)
+            current_vessel_container: Current container index being retrieved
+            current_retrieval_group: Current group being removed
+            containers_retrieved: Number of containers removed so far
+            yard_bay_row_occupied: Set tracking occupied stack (bay x row) positions
+            observation_space: Gymnasium observation space definition
+            action_space: Gymnasium action space (discrete actions)
+            render_mode: Rendering visualization mode
+            screen_width: Pixel width for rendering display
+            screen_height: Pixel height for rendering display
+            screen: Pygame screen object for rendering
+        """
         if config is None:
             config = {}
 
@@ -40,7 +85,7 @@ class StackEnv(gym.Env):
         self.group_num = config.get("group_num", 1)
         self.group_placement = config.get("group_placement", "fixed")
         self.seed = config.get("seed")
-        self.action_mask = config.get("action_mask", "default")
+        self.action_mask_with_obs = config.get("action_mask", "default")
         self.reward_scheme = config.get("reward_scheme", "default")
         self.observation_type = config.get("observation_type", "flat")
 
@@ -84,7 +129,7 @@ class StackEnv(gym.Env):
         # shape=(self.obs_coords, 5). Each slot stores 5 values: bay, row, tier, occupied(0/1), group number of the container
         observation_space = self._get_observation_space()
         
-        if self.action_mask == "default":
+        if self.action_mask_with_obs == "default":
             self.observation_space = observation_space
         else:
             self.observation_space = gym.spaces.Dict(
@@ -94,7 +139,7 @@ class StackEnv(gym.Env):
                 }
             )
 
-        # Action is choosing a yard (bay, row) to place the current vessel container
+        # Action is choosing a stack (bay x row) to place the current vessel container by selecting an action index corresponding to each stack.
         # Action index x = ((b-1)/2)*n + (r-1) where b is odd bay number (1,3,5,...), r is row (1,2,3,...), n is num_rows
         
         self.action_space = gym.spaces.Discrete(self.num_actions)
@@ -107,9 +152,9 @@ class StackEnv(gym.Env):
         self.screen_height = 60 * max(self.vessel_shape[2], self.yard_shape[2]) + 150
         self.screen = None
 
-    def _action_to_bay_row(self, action):
+    def _action_to_bay_row(self, action: int) -> Tuple[int, int]:
         """
-        Convert action index to (bay, row) pair
+        Convert action index (stack) to bay and row numbering
         Action index x = ((b-1)/2)*n + (r-1)
         where b is odd bay number (1,3,5,...), r is row number (1,2,...,n), n is num_rows
         
@@ -117,18 +162,17 @@ class StackEnv(gym.Env):
             tuple: (bay, row) where bay is odd bay number (1,3,5,...) and row is 1-indexed
         """
         n = self.yard_shape[1]  # num_rows
-        bay_idx = action // n  # which physical bay (0-indexed)
-        row_idx = action % n   # which row (0-indexed)
+        bay = action // n  # which physical bay (0-indexed)
+        row = (action % n) + 1   # which row (1-indexed)
         
         # Convert to actual bay number (1,3,5,7,...)
-        bay = 2 * bay_idx + 1
-        row = row_idx + 1
+        bay = 2 * bay + 1
         
         return bay, row
     
-    def _bay_row_to_action(self, bay, row):
+    def _bay_row_to_action(self, bay: int, row: int) -> int:
         """
-        Convert (bay, row) pair to action index
+        Convert (bay, row) numbering pair to action index (stack)
         Action index x = ((b-1)/2)*n + (r-1)
         
         Args:
@@ -142,13 +186,13 @@ class StackEnv(gym.Env):
         action = ((bay - 1) // 2) * n + (row - 1)
         return action
     
-    def _action_to_yard_slot(self, action):
+    def _action_to_yard_slot(self, action: int) -> Optional[int]:
         """
-        Convert action index to yard_slot index (for accessing yard_state)
+        Convert action index (stack) to yard_slot index (for accessing self.yard_state observation matrix)
         Finds the lowest unoccupied tier in the specified (bay, row) stack
         
         Returns:
-            int: yard_slot index in yard_state, or None if stack is full
+            int: yard_slot row index in self.yard_state, or None if stack is full
         """
         bay, row = self._action_to_bay_row(action)
         
@@ -171,10 +215,10 @@ class StackEnv(gym.Env):
         
         return None  # Stack is full
 
-    def step(self, action):
+    def step(self, action: int) -> Tuple[Union[np.ndarray, Dict], float, bool, bool, Dict]:
         """
         Execute one step: place current container from vessel to yard at a specified action (bay, row combination)
-        Action represents a (bay, row) pair where the container will be placed at the lowest available tier.
+        Action represents a stack (bay x row) where the container will be placed at the lowest available tier.
         """
         self.total_timesteps += 1  
         truncated = False
@@ -194,7 +238,7 @@ class StackEnv(gym.Env):
             terminated = True
             return observation, reward, terminated, truncated, info
 
-        # Convert action to yard_slot (actual slot index in yard_state)
+        # Convert action to yard_slot (actual row slot index in self.yard_state)
         yard_slot = self._action_to_yard_slot(action)
         if yard_slot is None:
             # This shouldn't happen if action masking works correctly
@@ -204,13 +248,14 @@ class StackEnv(gym.Env):
             terminated = True
             return observation, reward, terminated, truncated, info
 
-        # Check if placement bay is adjacent to vessel container's bay
-        vessel_container_bay = self.vessel_state[self.current_vessel_container, StateIds.BAY.value]
-        yard_placement_bay = self.yard_state[yard_slot, StateIds.BAY.value]
-        
         # Container can only be placed in same bay or adjacent bays (left/right) (REMOVING THIS FOR NOW AS PER DISCUSSION)
         # Huge negative reward if agent tries to place container in non-adjacent bay.
         # In this case, action does not change environment
+        
+        # Check if placement bay is adjacent to vessel container's bay
+        # vessel_container_bay = self.vessel_state[self.current_vessel_container, StateIds.BAY.value]
+        # yard_placement_bay = self.yard_state[yard_slot, StateIds.BAY.value]
+        
         # allowed_bays = [vessel_container_bay - 2, vessel_container_bay, vessel_container_bay + 2]
         # if yard_placement_bay not in allowed_bays:
             # reward = -100.0
@@ -246,7 +291,7 @@ class StackEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
-    def reset(self, seed=None, **kwargs):
+    def reset(self, seed: Optional[int] = None, **kwargs) -> Tuple[Union[np.ndarray, Dict], Dict]:
         """Reset environment wrapper"""
         if seed is not None:
             self.seed = seed
@@ -257,7 +302,7 @@ class StackEnv(gym.Env):
         info = {}
         return observation, info
 
-    def _reset(self):
+    def _reset(self) -> None:
         """Internal reset logic :
 
         Generate coords in bay-row-tier order
@@ -270,7 +315,7 @@ class StackEnv(gym.Env):
         and np.repeat for inner array
         For bays we just need to repeat each elements num_rows * num_tiers times
         
-        Example of yard_state and vessel_state after initialization for shape (3,2,2) for (bays,rows,tiers).
+        Example of self,.yard_state and self.vessel_state after initialization for shape (3,2,2) for (bays,rows,tiers).
         Each row represents a slot with 5 attributes: BAY, ROW, TIER,
         IS_OCCUPIED (boolean whther slot is occupied), GROUP (which group of container it holds).
 
@@ -294,6 +339,10 @@ class StackEnv(gym.Env):
             13	    5	 1	 2	     0	      0
             14	    5	 2	 1	     0	      0
             15	    5	 2	 2	     0	      0
+
+        The above example is shown for self.observation_type = "flat". 
+        Other types of observations are described in the _create_observation method but all other types of observations
+        are derived from the yard_state as described above.
 
         """
         # yard_state has shape (total_yard_coords, 5)
@@ -342,7 +391,7 @@ class StackEnv(gym.Env):
         self.current_vessel_container = self._get_next_vessel_container()
         self.total_containers_remaining = self.num_containers
 
-    def _initialize_vessel_loaded(self):
+    def _initialize_vessel_loaded(self) -> None:
         """
         Load vessel with containers - mirrors stowage but loads vessel instead of yard
         """
@@ -378,7 +427,7 @@ class StackEnv(gym.Env):
                         if start_idx < end_idx:
                             self.vessel_state[shuffled_slots[start_idx:end_idx], StateIds.GROUP.value] = group
 
-    def _generate_bay_coords(self, physical_bays: int) -> list:
+    def _generate_bay_coords(self, physical_bays: int) -> List[int]:
         """
         Generate initial bay coordinates based on the number of physical bays
         For example, _generate_bay_coords(7) would return [1, 2, 3, 5, 6, 7, 9, 10, 11, 13]
@@ -397,7 +446,7 @@ class StackEnv(gym.Env):
 
         return bay_groups
 
-    def _get_next_vessel_container(self):
+    def _get_next_vessel_container(self) -> Optional[int]:
         """
         Get next accessible top container from vessel - randomly selected from all topmost containers
         """
@@ -426,6 +475,8 @@ class StackEnv(gym.Env):
             return None
         
         # Randomly select one of the topmost containers
+        # NOTE : self.total_timesteps is used within rng to ensure different stacks are selected while selecting container from vessel
+        # Without this, the containers from same stack is selcted repeatedly until that stack is empty and then it moves to next stack.
         rng = np.random.RandomState(self.seed + self.total_timesteps)
         selected_idx = rng.choice(topmost_containers)
         
@@ -434,48 +485,35 @@ class StackEnv(gym.Env):
         
         return selected_idx
 
-    def _place_container_in_yard(self, yard_slot, vessel_container_idx):
+    def _place_container_in_yard(self, yard_slot: int, vessel_container_idx: int) -> None:
         """
-        Place vessel container in yard at specified slot (only lowest unoccupied slot per stack is filled)
+        Place vessel container in yard at specified slot.
+        Note: yard_slot is already the correct index (lowest unoccupied tier) as determined by _action_to_yard_slot().
         """
-        
         bay = self.yard_state[yard_slot, StateIds.BAY.value]
         row = self.yard_state[yard_slot, StateIds.ROW.value]
         group = self.vessel_state[vessel_container_idx, StateIds.GROUP.value]
         
-        # Find lowest unoccupied tier in this stack
-        bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & (self.yard_state[:, StateIds.ROW.value] == row)
-        bay_row_indices = np.where(bay_row_mask)[0]
+        # Place container at the specified slot
+        self.yard_state[yard_slot, StateIds.IS_OCCUPIED.value] = 1
+        self.yard_state[yard_slot, StateIds.GROUP.value] = group
         
-        
-        tiers_in_stack = self.yard_state[bay_row_indices, StateIds.TIER.value]
-        
-        # Sort by tier to find first unoccupied
-        sorted_indices = np.argsort(tiers_in_stack)
-        placement_idx = None
-        for idx in sorted_indices:
-            if self.yard_state[bay_row_indices[idx], StateIds.IS_OCCUPIED.value] == 0:
-                placement_idx = bay_row_indices[idx]
-                break
-        
-        if placement_idx is not None:
-            self.yard_state[placement_idx, StateIds.IS_OCCUPIED.value] = 1
-            self.yard_state[placement_idx, StateIds.GROUP.value] = group
-            
-            # Add stack to list of occupied stacks (used in reward function)
-            self.yard_bay_row_occupied.add((bay, row))
-            self.containers_retrieved += 1
+        # Add stack to list of occupied stacks (used in reward function)
+        self.yard_bay_row_occupied.add((bay, row))
+        self.containers_retrieved += 1
 
-    def _calculate_reward(self, yard_action):
+    def _calculate_reward(self, yard_action: int) -> float:
         """
         Function takes in yard_action (index of slot chosen to place container) and calculates reward for this placement
         Calculate reward based on exact rules:
         
+        0. Penalty for occupying new ground slot in unoccupied stack (to encourage stacking and not spreading out)
         1. Reward (+1/-1) for placing container in a stack having same/dissimilar containers in the same stack.
         2. Reward (+0.5/-0.5) for placing container having same/dissimilar containers in +/-1 adjacent rows (same bay only)
         3. Reward (+0.25/-0.25) for placing container having same/dissimilar containers in other stacks in same bay (not same row or adjacent rows)
         
         1,2 and 3 rewards are added for each similar/dissimilar container found in the same stack or adjacent rows.
+        Multipliers are applied to each rule to scale the rewards for each rule.
         Note : Simple reward scheme only applies rule 1.
         
         """
@@ -491,7 +529,7 @@ class StackEnv(gym.Env):
         rule_2_multiplier = 10.0
         rule_3_multiplier = 2.0
         
-        # Rule 0: Penalty for occupying new ground slot in unoccupied stack (REMOVING THIS FOR NOW AS PER DISCUSSION)
+        # Rule 0: Penalty for occupying new ground slot in unoccupied stack
         if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
             reward -= (rule_0_multiplier)
         
@@ -550,15 +588,12 @@ class StackEnv(gym.Env):
             diff_group_count = np.sum(adj_stack_container_groups != container_group)
             reward += (same_group_count - diff_group_count) * rule_2_multiplier
 
-        
-
-        
         return reward
 
     def _get_valid_yard_actions(self) -> np.ndarray:
         """
-        Get valid yard placement actions - returns action indices for (bay, row) combinations
-        that have at least one unoccupied tier in odd bays.
+        Get valid yard placement actions - returns action indices or stacks for each valid (bay x row) combination
+        that have at least one unoccupied tier in odd bays within the stack.
         Action index x = ((b-1)/2)*n + (r-1) where b is odd bay, r is row, n is num_rows
         """
         if self.current_vessel_container is None:
@@ -589,9 +624,9 @@ class StackEnv(gym.Env):
         
         return np.array(valid_actions, dtype=int)
 
-    def action_masks(self):
+    def action_masks(self) -> List[bool]:
         """
-        For compatibility with SB3
+        For compatibility with SB3 action masking.
         """
         if self.current_vessel_container is None:
             return [False] * self.action_space.n
@@ -599,10 +634,14 @@ class StackEnv(gym.Env):
         valid_actions = self._get_valid_yard_actions()
         return [action in valid_actions for action in range(self.action_space.n)]
 
-    def _get_observation_space(self):
+    def _get_observation_space(self) -> Union[gym.spaces.Box, gym.spaces.Dict]:
         """
         Get observation space based on observation_type
         Returns appropriate gym.spaces.Box for the specified observation type
+        Observation types are described in the _create_observation() method in detail but in summary:
+            - "flat": Original flat observation space with yard_state and current container attributes in a single array
+            - "stack_features": Stack-based feature observation space with features per stack
+            - "flat_parsed": Dictionary observation for rule-based agents with pre-parsed yard_state and current_container
         """
         if self.observation_type == "flat":
             # Original flat observation space
@@ -619,11 +658,6 @@ class StackEnv(gym.Env):
                 dtype=np.int64,
             )
         elif self.observation_type == "stack_features":
-            # Stack-based feature observation space
-            # Features per stack: group_counts(group_num) + num_occupied(1) + num_empty(1) + 
-            #                     current_group_onehot(group_num) + left_max_group_onehot(group_num) + 
-            #                     right_max_group_onehot(group_num) + vessel_remaining_per_group(group_num) +
-            #                     is_empty(1) + has_remaining_slots(1) + positional_index(1)
             features_per_stack = 5 * self.group_num + 5
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
             
@@ -638,8 +672,6 @@ class StackEnv(gym.Env):
                 dtype=np.float32,
             )
         elif self.observation_type == "flat_parsed":
-            # Dictionary observation for rule-based agents
-            # Returns pre-parsed yard_state and current_container as separate arrays
             return gym.spaces.Dict({
                 "yard_state": gym.spaces.Box(
                     low=0,
@@ -669,7 +701,7 @@ class StackEnv(gym.Env):
         else:
             raise ValueError(f"Unknown observation_type: {self.observation_type}")
 
-    def _create_stack_features(self):
+    def _create_stack_features(self) -> np.ndarray:
         """
         Transform yard_state into stack-based features
         
@@ -791,7 +823,7 @@ class StackEnv(gym.Env):
         
         return stack_features.flatten()
 
-    def _create_observation(self):
+    def _create_observation(self) -> Union[np.ndarray, Dict]:
         """
         Create observation based on observation_type
         
@@ -819,7 +851,7 @@ class StackEnv(gym.Env):
             - "current_container": 1D array (num_slot_attrs,)
         
         """
-        mask = self.action_masks() if self.action_mask != "default" else None
+        mask = self.action_masks() if self.action_mask_with_obs != "default" else None
         
         if self.observation_type == "flat":
             # Original flat observation
@@ -830,7 +862,7 @@ class StackEnv(gym.Env):
                 state = np.concatenate((state, np.zeros((1, 5), dtype=int)), axis=0)
             state = state.flatten()
             
-            if self.action_mask == "default":
+            if self.action_mask_with_obs == "default":
                 return state
             else:
                 return {"observation": state, "mask": mask}
@@ -839,7 +871,7 @@ class StackEnv(gym.Env):
             # Stack-based feature observation
             stack_features = self._create_stack_features()
             
-            if self.action_mask == "default":
+            if self.action_mask_with_obs == "default":
                 return stack_features
             else:
                 return {"observation": stack_features, "mask": mask}
@@ -863,7 +895,7 @@ class StackEnv(gym.Env):
         else:
             raise ValueError(f"Unknown observation_type: {self.observation_type}")
 
-    def render(self):
+    def render(self) -> Optional[np.ndarray]:
         """
         Render the environment as an RGB array (similar to stowage env)
         """
@@ -912,7 +944,7 @@ class StackEnv(gym.Env):
 
         return np.transpose(np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2))
 
-    def _draw_grid(self, state, top, height, bays, rows, tiers, is_vessel):
+    def _draw_grid(self, state: np.ndarray, top: int, height: float, bays: int, rows: int, tiers: int, is_vessel: bool) -> None:
         """
         Draw a grid section (vessel or yard) with fixed cell size
         """
@@ -941,13 +973,13 @@ class StackEnv(gym.Env):
         )
         self._draw_bay_dividers(left_margin, top, bays, rows, cell_width, tiers, cell_height, colors["bay_grid"])
 
-    def _setup_grid_dimensions(self, bays, rows):
+    def _setup_grid_dimensions(self, bays: int, rows: int) -> Tuple[int, int, float, int]:
         cell_width, cell_height = 35, 35
         padding, label_margin = 30, 15
         left_margin = max(padding, (self.screen_width - bays * rows * cell_width) / 2)
         return cell_width, cell_height, left_margin, label_margin
 
-    def _setup_colors(self):
+    def _setup_colors(self) -> Dict[str, Any]:
         group_colors = []
         for i in range(self.group_num):
             hue = i / self.group_num
@@ -965,7 +997,7 @@ class StackEnv(gym.Env):
             "target": (255, 0, 0),
         }
 
-    def _get_row_order(self, rows, is_vessel):
+    def _get_row_order(self, rows: int, is_vessel: bool) -> List[int]:
         """
         Determine row ordering based on vessel or yard
         """
@@ -981,7 +1013,7 @@ class StackEnv(gym.Env):
         else:
             return list(range(1, rows + 1))
 
-    def _draw_tier_labels(self, top, tiers, cell_height, left_margin, label_margin, font):
+    def _draw_tier_labels(self, top: int, tiers: int, cell_height: int, left_margin: float, label_margin: int, font: Any) -> None:
         """
         Draw tier labels on the left side
         """
@@ -990,7 +1022,7 @@ class StackEnv(gym.Env):
             tier_label = font.render(f"{t}", True, (0, 0, 0))
             self.screen.blit(tier_label, (left_margin - label_margin, y - tier_label.get_height() / 2))
 
-    def _build_cell_info(self, state, bays, is_vessel):
+    def _build_cell_info(self, state: np.ndarray, bays: int, is_vessel: bool) -> Dict[Tuple[int, int, int], Dict[str, Any]]:
         """
         Build cell information dictionary for rendering
         """
@@ -1056,36 +1088,36 @@ class StackEnv(gym.Env):
 
         return cell_info
 
-    def _is_target_cell(self, idx, is_vessel):
+    def _is_target_cell(self, idx: int, is_vessel: bool) -> bool:
         if is_vessel:
             return self.current_vessel_container == idx if self.current_vessel_container is not None else False
         return False
 
-    def _create_cell_props(self, filled, target, idx, group):
+    def _create_cell_props(self, filled: bool, target: bool, idx: Optional[int], group: int) -> Dict[str, Any]:
         # Used for inheritance
         return {"filled": filled, "target": target, "idx": idx, "group": group}
 
-    def _get_cell_border_style(self, cell):
+    def _get_cell_border_style(self, cell: Dict[str, Any]) -> Tuple[Tuple[int, int, int], int]:
         if cell["target"]:
             return (255, 0, 0), 3       # Red border for curently selcted container in vessel for yard placement
         return (180, 180, 180), 1
 
     def _draw_grid_cells(
         self,
-        cell_info,
-        top,
-        left_margin,
-        bays,
-        rows,
-        tiers,
-        row_order,
-        cell_width,
-        cell_height,
-        label_margin,
-        colors,
-        fonts,
-        is_vessel,
-    ):
+        cell_info: Dict[Tuple[int, int, int], Dict[str, Any]],
+        top: int,
+        left_margin: float,
+        bays: int,
+        rows: int,
+        tiers: int,
+        row_order: List[int],
+        cell_width: int,
+        cell_height: int,
+        label_margin: int,
+        colors: Dict[str, Any],
+        fonts: Dict[str, Any],
+        is_vessel: bool,
+    ) -> None:
         """
         Draw grid cells with labels
         """
@@ -1115,7 +1147,7 @@ class StackEnv(gym.Env):
 
                     self._draw_cell(x, y, cell_width, cell_height, cell, colors, fonts, is_vessel)
 
-    def _draw_cell(self, x, y, width, height, cell, colors, fonts, is_vessel):
+    def _draw_cell(self, x: float, y: float, width: int, height: int, cell: Dict[str, Any], colors: Dict[str, Any], fonts: Dict[str, Any], is_vessel: bool) -> None:
         """
         Draw an individual cell
         """
@@ -1146,7 +1178,7 @@ class StackEnv(gym.Env):
                 label = fonts["tiny"].render(f"{cell['idx']}", True, text_color)
                 self.screen.blit(label, label.get_rect(center=(x + width / 2, y + height / 2)))
 
-    def _draw_bay_dividers(self, left_margin, top, bays, rows, cell_width, tiers, cell_height, color):
+    def _draw_bay_dividers(self, left_margin: float, top: int, bays: int, rows: int, cell_width: int, tiers: int, cell_height: int, color: Tuple[int, int, int]) -> None:
         """
         Draw vertical divider lines between bays
         """
