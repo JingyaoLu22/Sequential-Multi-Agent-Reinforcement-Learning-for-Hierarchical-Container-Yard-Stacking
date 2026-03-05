@@ -161,7 +161,7 @@ class HighLevelAgent(BaseAgent):
             return self._random_policy(observation, valid_actions)
         elif self.policy_type == "rl_agent":
             # Placeholder for future RL-based high-level agent
-            pass
+            raise NotImplementedError("RL-based high-level agent not implemented yet.")
         else:
             raise ValueError(f"Unknown policy type: {self.policy_type}")
 
@@ -205,6 +205,9 @@ class HighLevelAgent(BaseAgent):
             raise RuntimeError("No valid actions available for the high level agent.")
 
         # Get parsed yard state and current container info from observation
+        if not isinstance(observation, dict) :
+            raise ValueError("Expected observation to be a dictionary with 'yard_state' and 'current_container' keys.")
+        
         yard_state = observation["yard_state"]
         current_container = observation["current_container"]
         container_group = int(current_container[StateIds.GROUP.value])

@@ -784,6 +784,7 @@ class StackEnv(gym.Env):
                 low=0,
                 high=max(
                     self.yard_shape[2],  # max count per group in a stack
+                    self.num_containers,  # vessel_remaining_per_group upper limit
                     num_stacks,  # positional index upper limit
                     1,  # binary features upper limit
                 ),
@@ -871,12 +872,12 @@ class StackEnv(gym.Env):
                 self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
             )
 
-        # Calculate remaining containers per group in vessel (excluding group 0)
+        # Calculate remaining containers per group in vessel
         vessel_group_counts = np.zeros(self.group_num, dtype=np.float32)
         vessel_occupied_mask = self.vessel_state[:, StateIds.IS_OCCUPIED.value] == 1
         vessel_occupied_slots = self.vessel_state[vessel_occupied_mask]
-        for group in range(1, self.group_num + 1):
-            vessel_group_counts[group - 1] = np.sum(
+        for group in range(self.group_num):
+            vessel_group_counts[group] = np.sum(
                 vessel_occupied_slots[:, StateIds.GROUP.value] == group
             )
 
@@ -891,8 +892,8 @@ class StackEnv(gym.Env):
 
                 feature_idx = 0
 
-                # Count each group in this stack (excluding group 0 as it indicates unoccupied)
-                for group in range(1, self.group_num + 1):
+                # Count each group in this stack (IS_OCCUPIED distinguishes empty slots from group-0 containers)
+                for group in range(self.group_num):
                     group_mask = (stack_slots[:, StateIds.IS_OCCUPIED.value] == 1) & (
                         stack_slots[:, StateIds.GROUP.value] == group
                     )
@@ -909,9 +910,9 @@ class StackEnv(gym.Env):
                 stack_features[stack_idx, feature_idx] = num_empty
                 feature_idx += 1
 
-                # current_group (one-hot) - excluding group 0
-                if current_group >= 1:
-                    stack_features[stack_idx, feature_idx + (current_group - 1)] = 1.0
+                # current_group (one-hot) - group 0 is valid, use 0-indexed offset
+                if current_group >= 0:
+                    stack_features[stack_idx, feature_idx + current_group] = 1.0
                 feature_idx += self.group_num
 
                 # left_row_max_group (one-hot) - left adjacent row in same bay
@@ -924,16 +925,13 @@ class StackEnv(gym.Env):
                     )
                     left_groups = self.yard_state[left_mask, StateIds.GROUP.value]
                     if len(left_groups) > 0:
-                        # Find most common group in left row (excluding group 0)
-                        left_groups_valid = left_groups[left_groups > 0]
-                        if len(left_groups_valid) > 0:
-                            left_max_group = np.bincount(
-                                left_groups_valid.astype(int)
-                            ).argmax()
-                            if left_max_group >= 1:
-                                stack_features[
-                                    stack_idx, feature_idx + (left_max_group - 1)
-                                ] = 1.0
+                        # Find most common group in left row (IS_OCCUPIED already filtered)
+                        left_max_group = np.bincount(
+                            left_groups.astype(int)
+                        ).argmax()
+                        stack_features[
+                            stack_idx, feature_idx + left_max_group
+                        ] = 1.0
                 feature_idx += self.group_num
 
                 # right_row_max_group (one-hot) - right adjacent row in same bay
@@ -946,16 +944,13 @@ class StackEnv(gym.Env):
                     )
                     right_groups = self.yard_state[right_mask, StateIds.GROUP.value]
                     if len(right_groups) > 0:
-                        # Find most common group in right row (excluding group 0)
-                        right_groups_valid = right_groups[right_groups > 0]
-                        if len(right_groups_valid) > 0:
-                            right_max_group = np.bincount(
-                                right_groups_valid.astype(int)
-                            ).argmax()
-                            if right_max_group >= 1:
-                                stack_features[
-                                    stack_idx, feature_idx + (right_max_group - 1)
-                                ] = 1.0
+                        # Find most common group in right row (IS_OCCUPIED already filtered)
+                        right_max_group = np.bincount(
+                            right_groups.astype(int)
+                        ).argmax()
+                        stack_features[
+                            stack_idx, feature_idx + right_max_group
+                        ] = 1.0
                 feature_idx += self.group_num
 
                 # vessel_remaining_per_group (count of remaining containers per group in vessel)
@@ -1024,17 +1019,15 @@ class StackEnv(gym.Env):
 
                 # Feature: max_group (one-hot) - dominant group in this stack
                 occupied_mask = stack_slots[:, StateIds.IS_OCCUPIED.value] == 1
-                max_group = 0
+                max_group = -1  # sentinel: stack is empty
                 if np.any(occupied_mask):
                     occupied_groups = stack_slots[occupied_mask, StateIds.GROUP.value]
-                    # Exclude group 0 (should not occur in occupied slots, but just in case)
-                    valid_groups = occupied_groups[occupied_groups > 0]
-                    if len(valid_groups) > 0:
-                        max_group = np.bincount(valid_groups.astype(int)).argmax()
+                    # IS_OCCUPIED already filters empty slots; group 0 is a valid container group
+                    max_group = np.bincount(occupied_groups.astype(int)).argmax()
                 
-                # Set one-hot encoding for max_group (groups 1 to group_num)
-                if max_group >= 1:
-                    stack_features[stack_idx, feature_idx + (max_group - 1)] = 1.0
+                # Set one-hot encoding for max_group (groups 0 to group_num-1)
+                if max_group >= 0:
+                    stack_features[stack_idx, feature_idx + max_group] = 1.0
                 feature_idx += self.group_num
 
                 # Feature: num_occupied_in_stack
@@ -1042,9 +1035,9 @@ class StackEnv(gym.Env):
                 stack_features[stack_idx, feature_idx] = num_occupied
                 feature_idx += 1
 
-                # Feature: current_container_group (one-hot, same for all stacks)
-                if current_container_group >= 1:
-                    stack_features[stack_idx, feature_idx + (current_container_group - 1)] = 1.0
+                # Feature: current_container_group (one-hot, same for all stacks; group 0 is valid)
+                if current_container_group >= 0:
+                    stack_features[stack_idx, feature_idx + current_container_group] = 1.0
                 feature_idx += self.group_num
 
                 # Feature: left_right_row_max_group (one-hot) - dominant group in adjacent rows
@@ -1075,17 +1068,15 @@ class StackEnv(gym.Env):
                         adjacent_groups.extend(right_groups)
 
                 # Find dominant group in combined adjacent rows and set one-hot encoding
-                left_right_max_group = 0
+                left_right_max_group = -1  # sentinel: no adjacent occupied containers
                 if len(adjacent_groups) > 0:
                     adjacent_groups_array = np.array(adjacent_groups)
-                    # Exclude group 0
-                    valid_adjacent = adjacent_groups_array[adjacent_groups_array > 0]
-                    if len(valid_adjacent) > 0:
-                        left_right_max_group = np.bincount(valid_adjacent.astype(int)).argmax()
+                    # IS_OCCUPIED already filtered; group 0 is a valid container group
+                    left_right_max_group = np.bincount(adjacent_groups_array.astype(int)).argmax()
                 
-                # Set one-hot encoding for left_right_row_max_group
-                if left_right_max_group >= 1:
-                    stack_features[stack_idx, feature_idx + (left_right_max_group - 1)] = 1.0
+                # Set one-hot encoding for left_right_row_max_group (groups 0 to group_num-1)
+                if left_right_max_group >= 0:
+                    stack_features[stack_idx, feature_idx + left_right_max_group] = 1.0
                 feature_idx += self.group_num
 
                 # Feature: stack_index
