@@ -45,6 +45,7 @@ class StackEnv(gym.Env):
                 - reward_scheme: Reward calculation scheme ("default")
                 - observation_type: Observation format ("flat", "stack_features", "stack_features_simplev2", "flat_parsed")
                 - reward_norm: Whether to normalize reward
+                - reward_clip: Whether to clip reward to a certain range
             render_mode: Rendering mode for visualization ("rgb_array")
 
         Attributes:
@@ -74,6 +75,7 @@ class StackEnv(gym.Env):
             yard_bay_row_occupied: Set tracking occupied stack (bay x row) positions
             observation_space: Gymnasium observation space definition
             reward_norm: Whether to normalize reward
+            reward_clip: Whether to clip reward to a certain range
             action_space: Gymnasium action space (discrete actions)
             render_mode: Rendering visualization mode
             screen_width: Pixel width for rendering display
@@ -91,8 +93,11 @@ class StackEnv(gym.Env):
         self.seed = config.get("seed")
         self.action_mask_with_obs = config.get("action_mask", "default")
         self.reward_scheme = config.get("reward_scheme", "default")
+        self.reward_design = config.get("reward_design", "default")
         self.observation_type = config.get("observation_type", "flat")
         self.reward_norm = config.get("reward_norm", False)
+        self.reward_clip = config.get("reward_clip", False)
+        self.pos_embeddings = config.get("pos_embeddings", False)
 
         if self.seed is None:
             # Use instance-level RandomState for thread-safe parallel execution
@@ -144,6 +149,14 @@ class StackEnv(gym.Env):
 
         # Track which bay/row cells have been occupied in yard
         self.yard_bay_row_occupied = set()
+
+        # Pre-compute sinusoidal positional encoding for stack_features (fixed, computed once)
+        if self.pos_embeddings and self.observation_type == "stack_features":
+            num_stacks = self.yard_shape[0] * self.yard_shape[1]
+            max_frequency = self.yard_shape[1]
+            self.stack_pos_encoding = self._stack_positional_encoding(num_stacks, max_frequency)
+        else:
+            self.stack_pos_encoding = None
 
         # Observation and action spaces
         # Maximum for observation space based on yard and container attributes (vessel_state excluded)
@@ -346,9 +359,9 @@ class StackEnv(gym.Env):
         if seed is not None:
             self.seed = seed
         else:
-            # Use instance-level RandomState for thread-safe parallel execution
-            rng = np.random.RandomState()
-            self.seed = rng.randint(0, 10000)
+            # Increment seed deterministically so each parallel env
+            # maintains its own diverging seed sequence from its rank offset
+            self.seed += 1
         self._reset()
         observation = self._create_observation()
         info = {}
@@ -588,6 +601,18 @@ class StackEnv(gym.Env):
 
     def _calculate_reward(self, yard_action: int) -> float:
         """
+        Routes to the appropriate reward function based on self.reward_design.
+            - "default"        -> _calculate_default_reward
+            - "majority_reward" -> _calculate_majority_reward
+        """
+        if self.reward_design == "majority_reward":
+            reward =  self._calculate_majority_reward(yard_action)
+        elif self.reward_design == "default":
+             reward = self._calculate_default_reward(yard_action)
+        return reward
+
+    def _calculate_default_reward(self, yard_action: int) -> float:
+        """
         Function takes in yard_action (index of slot chosen to place container) and calculates reward for this placement
         Calculate reward based on exact rules:
 
@@ -649,6 +674,8 @@ class StackEnv(gym.Env):
                 reward += (same_group_count - diff_group_count) * rule_1_multiplier
 
         if self.reward_scheme == "simple_single_stack":
+            if self.reward_clip:
+                reward = np.clip(reward, -5.0, 5.0)
             return reward
 
         # Find  +/- 1 adjacent rows in the same bay
@@ -707,6 +734,96 @@ class StackEnv(gym.Env):
             else:
                 reward += (same_group_count - diff_group_count) * rule_2_multiplier
 
+        if self.reward_clip:
+            reward = np.clip(reward, -5.0, 5.0)
+        return reward
+
+    def _get_majority_group(self, bay: int, row: int) -> Optional[int]:
+        """
+        Return the most common group in the given (bay, row) stack among occupied slots.
+        Returns None if the stack has no occupied slots (i.e. it is empty).
+        Ties are broken by the lowest group index (numpy argmax default).
+        """
+        bay_row_mask = (
+            (self.yard_state[:, StateIds.BAY.value] == bay)
+            & (self.yard_state[:, StateIds.ROW.value] == row)
+            & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+        )
+        occupied_indices = np.where(bay_row_mask)[0]
+        if len(occupied_indices) == 0:
+            return None
+        groups = self.yard_state[occupied_indices, StateIds.GROUP.value]
+        counts = np.bincount(groups)
+        return int(np.argmax(counts))
+
+    def _calculate_majority_reward(self, yard_action: int) -> float:
+        """
+        Alternate reward design based on majority group matching.
+
+        Rules (applied before the container is placed):
+
+        Stack rules (evaluated on the currently placed stack):
+          Rule 3: Penalty for occupying a previously empty stack       -> -0.1
+          Rule 1: Majority group in placed stack == container group    ->  0.0
+          Rule 2: Majority group in placed stack != container group    -> -1.0
+          (Rules 1/2 only apply when the stack is non-empty.)
+
+        Neighbourhood rules (l = majority of left adjacent stack,
+                             r = majority of right adjacent stack,
+                             c = container_group;
+                             empty adjacent stacks are excluded):
+          Rule 4: All non-empty adjacents match c                      ->  0.0
+          Rule 5: Exactly one of two non-empty adjacents matches c     -> -0.3
+          Rule 6: All non-empty adjacents (1 or 2) do NOT match c     -> -0.6
+          (Rules 4-6 are skipped if there are no non-empty adjacent stacks.)
+
+        No reward clipping is applied.
+        """
+        placement_bay = self.yard_state[yard_action, StateIds.BAY.value]
+        placement_row = self.yard_state[yard_action, StateIds.ROW.value]
+        container_group = int(
+            self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+        )
+
+        reward = 0.0
+
+        # --- Stack rules ---
+        stack_is_empty = (placement_bay, placement_row) not in self.yard_bay_row_occupied
+
+        # Rule 3: penalty for occupying a new (empty) stack
+        if stack_is_empty:
+            reward -= 0.1
+        else:
+            # Rules 1 & 2: majority group comparison
+            majority = self._get_majority_group(placement_bay, placement_row)
+            if majority is not None and majority != container_group:
+                reward -= 1.0
+            # majority == container_group -> +0 (no change)
+
+        # --- Neighbourhood rules ---
+        # Collect majority groups of non-empty adjacent stacks (left then right)
+        non_empty_adj_majorities = []
+        if placement_row > 1:
+            left_maj = self._get_majority_group(placement_bay, placement_row - 1)
+            if left_maj is not None:
+                non_empty_adj_majorities.append(left_maj)
+        if placement_row < self.yard_shape[1]:
+            right_maj = self._get_majority_group(placement_bay, placement_row + 1)
+            if right_maj is not None:
+                non_empty_adj_majorities.append(right_maj)
+
+        if len(non_empty_adj_majorities) > 0:
+            match_count = sum(1 for m in non_empty_adj_majorities if m == container_group)
+            if match_count == len(non_empty_adj_majorities):
+                # Rule 4: all non-empty adjacents match c -> 0
+                reward+= 0.0
+            elif match_count > 0:
+                # Rule 5: exactly one of two matches c
+                reward -= 0.3
+            else:
+                # Rule 6: none match c
+                reward -= 0.6
+
         return reward
 
     def _get_valid_yard_actions(self) -> np.ndarray:
@@ -753,6 +870,19 @@ class StackEnv(gym.Env):
         valid_actions = self._get_valid_yard_actions()
         return [action in valid_actions for action in range(self.action_space.n)]
 
+    def _stack_positional_encoding(self, num_stacks: int, max_frequency: int) -> np.ndarray:
+        """
+        Create sinusoidal positional encoding for stacks.
+        Returns ndarray of shape (num_stacks, 2 * max_frequency).
+        Stack indices are normalized to [0, 1) before applying sin/cos at each frequency.
+        """
+        p = np.arange(num_stacks) / num_stacks
+        features = []
+        for k in range(1, max_frequency + 1):
+            features.append(np.sin(2 * np.pi * k * p))
+            features.append(np.cos(2 * np.pi * k * p))
+        return np.stack(features, axis=1).astype(np.float32)
+
     def _get_observation_space(self) -> Union[gym.spaces.Box, gym.spaces.Dict]:
         """
         Get observation space based on observation_type
@@ -777,20 +907,33 @@ class StackEnv(gym.Env):
                 dtype=np.int64,
             )
         elif self.observation_type == "stack_features":
-            features_per_stack = 5 * self.group_num + 5
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
-
-            return gym.spaces.Box(
-                low=0,
-                high=max(
-                    self.yard_shape[2],  # max count per group in a stack
-                    self.num_containers,  # vessel_remaining_per_group upper limit
-                    num_stacks,  # positional index upper limit
-                    1,  # binary features upper limit
-                ),
-                shape=(num_stacks * features_per_stack,),
-                dtype=np.float32,
-            )
+            if self.pos_embeddings:
+                # Replace scalar positional_index with 2 * max_frequency sin/cos features
+                features_per_stack = 5 * self.group_num + 4 + 2 * self.yard_shape[1]
+                return gym.spaces.Box(
+                    low=-1,
+                    high=max(
+                        self.yard_shape[2],  # max count per group in a stack
+                        self.num_containers,  # vessel_remaining_per_group upper limit
+                        1,  # binary features upper limit
+                    ),
+                    shape=(num_stacks * features_per_stack,),
+                    dtype=np.float32,
+                )
+            else:
+                features_per_stack = 5 * self.group_num + 5
+                return gym.spaces.Box(
+                    low=0,
+                    high=max(
+                        self.yard_shape[2],  # max count per group in a stack
+                        self.num_containers,  # vessel_remaining_per_group upper limit
+                        num_stacks,  # positional index upper limit
+                        1,  # binary features upper limit
+                    ),
+                    shape=(num_stacks * features_per_stack,),
+                    dtype=np.float32,
+                )
         elif self.observation_type == "flat_parsed":
             return gym.spaces.Dict(
                 {
@@ -851,7 +994,8 @@ class StackEnv(gym.Env):
         - right_row_max_group (1-hot): one-hot encoding of dominant group in right adjacent row (same bay)
         - is_empty: 1 if stack is completely empty, 0 otherwise
         - has_remaining_slots: 1 if stack has at least one empty slot, 0 otherwise
-        - positional_index: sequential index of the stack (0, 1, 2, ...)
+        - if pos_embeddings=False: positional_index: sequential index of the stack (0, 1, 2, ...)
+        - if pos_embeddings=True:  sin/cos positional encoding (2 * yard_rows features per stack)
 
         Returns:
             np.ndarray: Feature vector for all stacks
@@ -862,7 +1006,10 @@ class StackEnv(gym.Env):
         yard_rows = np.arange(1, self.yard_shape[1] + 1)
 
         num_stacks = len(yard_bays) * len(yard_rows)
-        features_per_stack = 5 * self.group_num + 5
+        if self.pos_embeddings:
+            features_per_stack = 5 * self.group_num + 4 + 2 * self.yard_shape[1]
+        else:
+            features_per_stack = 5 * self.group_num + 5
         stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
 
         # Get current container group
@@ -969,8 +1116,14 @@ class StackEnv(gym.Env):
                 stack_features[stack_idx, feature_idx] = 1.0 if num_empty > 0 else 0.0
                 feature_idx += 1
 
-                # positional_index
-                stack_features[stack_idx, feature_idx] = stack_idx
+                # positional encoding
+                if self.pos_embeddings:
+                    # sinusoidal positional embedding (2 * max_frequency features, pre-computed)
+                    pe_size = 2 * self.yard_shape[1]
+                    stack_features[stack_idx, feature_idx : feature_idx + pe_size] = self.stack_pos_encoding[stack_idx]
+                else:
+                    # scalar positional index
+                    stack_features[stack_idx, feature_idx] = stack_idx
 
                 stack_idx += 1
 

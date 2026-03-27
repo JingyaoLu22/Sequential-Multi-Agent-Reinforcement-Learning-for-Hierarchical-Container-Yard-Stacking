@@ -15,5 +15,6 @@ dependencies = [
     "sb3-contrib>=2.7.1",
     "scipy>=1.17.0",
     "stable-baselines3==2.7.0",
+    "tensorboard>=2.20.0",
     "wandb>=0.24.0",
 ]
