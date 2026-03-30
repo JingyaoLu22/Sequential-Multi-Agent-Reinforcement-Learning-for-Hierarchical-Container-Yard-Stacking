@@ -6,12 +6,12 @@ Let N be number of stacks in the yard (== num_actions) and F be the number of fe
 include_container_in_encoder controls whether the current-container (one-hot) is included in the encoder input or only used as side context for the decoder and critic.
 B is the batch dimension. D is the embed_dim (hidden dim) for the transformer.
 so the input observation is a flat vector of shape (N*F,). sb3 requires it to be flattened,
-so reshaping it into (B, N, F) is the first step in the features extractor.  
+so reshaping it into (B, N, F) is the first step in the features extractor.
 
-Then a forward pass through the transformer encoder produces 
+Then a forward pass through the transformer encoder produces
 graph embeddings (GE) of shape (B, N, embed_dim).
 
-The graph embeddings (GE) and the current_container features are used 
+The graph embeddings (GE) and the current_container features are used
 in the PointerDecoder to produce the stack action logits (B, N)
 and in the critic head to produce value estimates (B, vf_dim).
 
@@ -37,7 +37,7 @@ obs (B, N*F)
        action_net = nn.Identity()   ← pointer logits pass through unchanged
        value_net  = nn.Linear(vf_dim, 1)
   └─ MaskablePPO (apply action masks)
-       logits[action_mask == 0] = -inf  
+       logits[action_mask == 0] = -inf
 
 PointerDecoder (AM-style, Kool et al. 2019)
 -------------------------------------------
@@ -130,7 +130,9 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         self._cont_end = 2 * group_num + 2
 
         # Encoder input: keep or strip the current_group_onehot (G features)
-        enc_f_per_stack = f_per_stack if include_container_in_encoder else f_per_stack - group_num
+        enc_f_per_stack = (
+            f_per_stack if include_container_in_encoder else f_per_stack - group_num
+        )
         self.input_proj = nn.Linear(enc_f_per_stack, embed_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -148,21 +150,21 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         # observations: (B, N*F)
         b = observations.shape[0]
-        x = observations.view(b, self.n_stacks, -1)            # (B, N, F)
+        x = observations.view(b, self.n_stacks, -1)  # (B, N, F)
         # Extract current_container features
-        container_feats = x[:, 0, self._cont_start:self._cont_end].clone()  # (B, G)
+        container_feats = x[:, 0, self._cont_start : self._cont_end].clone()  # (B, G)
         if not self.include_container_in_encoder:
             # Strip the one-hot so the encoder only sees yard-state features
-            x = torch.cat([x[:, :, :self._cont_start],
-                           x[:, :, self._cont_end:]], dim=-1)  # (B, N, F-G)
-        x = self.input_proj(x)                                  # (B, N, embed_dim)
-        x = self.encoder(x)                                     # (B, N, embed_dim)
-        enc_flat = x.flatten(start_dim=1)                       # (B, N*embed_dim)
+            x = torch.cat(
+                [x[:, :, : self._cont_start], x[:, :, self._cont_end :]], dim=-1
+            )  # (B, N, F-G)
+        x = self.input_proj(x)  # (B, N, embed_dim)
+        x = self.encoder(x)  # (B, N, embed_dim)
+        enc_flat = x.flatten(start_dim=1)  # (B, N*embed_dim)
 
         # container_feats is appended to the output from encoder (without any learnable parameters)
         # so that it can be used by decoder
-        return torch.cat([enc_flat, container_feats], dim=-1)   # (B, N*embed_dim + G)
-
+        return torch.cat([enc_flat, container_feats], dim=-1)  # (B, N*embed_dim + G)
 
 
 class PointerDecoder(nn.Module):
@@ -230,24 +232,24 @@ class PointerDecoder(nn.Module):
             logits          : (B, N)
         """
         # Split node embeddings into keys, values and logit keys
-        K, V, L = self.project_node(GE).chunk(3, dim=-1)   # each (B, N, D)
+        K, V, L = self.project_node(GE).chunk(3, dim=-1)  # each (B, N, D)
 
         # Global context vector mean pooling
-        G_ctx = self.project_global(GE.mean(dim=1))         # (B, D)
+        G_ctx = self.project_global(GE.mean(dim=1))  # (B, D)
 
         # Current Step context from current container
-        C_k = self.project_step(container_feats)             # (B, D)
+        C_k = self.project_step(container_feats)  # (B, D)
 
         # Query = global context + step context
-        Q = (G_ctx + C_k).unsqueeze(1)                       # (B, 1, D)
+        Q = (G_ctx + C_k).unsqueeze(1)  # (B, 1, D)
 
         # Glimpse via multi-head cross-attention
-        H, _ = self.cross_attn(Q, K, V)                      # (B, 1, D)
-        G_k = self.out_proj(H)                               # (B, 1, D)
+        H, _ = self.cross_attn(Q, K, V)  # (B, 1, D)
+        G_k = self.out_proj(H)  # (B, 1, D)
 
         # Dot-product scoring against logit keys
         logits = torch.bmm(G_k, L.transpose(1, 2)) / self._scale  # (B, 1, N)
-        logits = logits.squeeze(1)                           # (B, N)
+        logits = logits.squeeze(1)  # (B, N)
 
         # Tanh clipping helps stability by preventing large logit values
         if self.tanh_clipping > 0:
@@ -317,24 +319,28 @@ class TransformerActorCritic(nn.Module):
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.forward_actor(features), self.forward_critic(features)
 
-    def _split_features(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _split_features(
+        self, features: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Split (B, N*D+G) into GE (B, N, D) and container_feats (B, G)."""
-        enc_feats = features[:, :self._enc_size]              # (B, N*embed_dim)
-        container_feats = features[:, self._enc_size:]        # (B, G)
-        GE = enc_feats.view(features.shape[0], self.n_stacks, self.embed_dim)  # (B, N, D)
+        enc_feats = features[:, : self._enc_size]  # (B, N*embed_dim)
+        container_feats = features[:, self._enc_size :]  # (B, G)
+        GE = enc_feats.view(
+            features.shape[0], self.n_stacks, self.embed_dim
+        )  # (B, N, D)
         return GE, container_feats
 
     def forward_actor(self, features: torch.Tensor) -> torch.Tensor:
         # features: (B, N*embed_dim + G)
         GE, container_feats = self._split_features(features)
-        return self.decoder(GE, container_feats)               # (B, N)
+        return self.decoder(GE, container_feats)  # (B, N)
 
     def forward_critic(self, features: torch.Tensor) -> torch.Tensor:
         # features: (B, N*embed_dim + G)
         GE, container_feats = self._split_features(features)
-        pooled = GE.mean(dim=1)                               # (B, embed_dim)
-        C_k = self.critic_step_proj(container_feats)           # (B, embed_dim)
-        return self.critic_head(pooled + C_k)                 # (B, vf_dim)
+        pooled = GE.mean(dim=1)  # (B, embed_dim)
+        C_k = self.critic_step_proj(container_feats)  # (B, embed_dim)
+        return self.critic_head(pooled + C_k)  # (B, vf_dim)
 
 
 class MaskableTransformerPolicy(MaskableActorCriticPolicy):
@@ -404,7 +410,9 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
 
     def _build_mlp_extractor(self) -> None:
         # Derive group_num: features_dim = N*embed_dim + group_num
-        group_num = self.features_dim - self._transformer_n_stacks * self._transformer_embed_dim
+        group_num = (
+            self.features_dim - self._transformer_n_stacks * self._transformer_embed_dim
+        )
         self.mlp_extractor = TransformerActorCritic(
             feature_dim=self.features_dim,
             n_stacks=self._transformer_n_stacks,
@@ -417,6 +425,6 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
 
     def _build(self, lr_schedule: Callable[[float], float]) -> None:
         super()._build(lr_schedule)
-        # Replace the standard Linear(latent_dim_pi, action_space.n) with Identity 
+        # Replace the standard Linear(latent_dim_pi, action_space.n) with Identity
         # for sb3 compatibility
         self.action_net = nn.Identity()

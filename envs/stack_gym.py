@@ -154,7 +154,9 @@ class StackEnv(gym.Env):
         if self.pos_embeddings and self.observation_type == "stack_features":
             num_stacks = self.yard_shape[0] * self.yard_shape[1]
             max_frequency = self.yard_shape[1]
-            self.stack_pos_encoding = self._stack_positional_encoding(num_stacks, max_frequency)
+            self.stack_pos_encoding = self._stack_positional_encoding(
+                num_stacks, max_frequency
+            )
         else:
             self.stack_pos_encoding = None
 
@@ -331,9 +333,7 @@ class StackEnv(gym.Env):
             self.total_containers_remaining == 0
         )
         valid_actions = (
-            self._get_valid_yard_actions()
-            if not truncated
-            else np.array([], dtype=int)
+            self._get_valid_yard_actions() if not truncated else np.array([], dtype=int)
         )
         valid_actions_list = (
             valid_actions.tolist()
@@ -606,9 +606,9 @@ class StackEnv(gym.Env):
             - "majority_reward" -> _calculate_majority_reward
         """
         if self.reward_design == "majority_reward":
-            reward =  self._calculate_majority_reward(yard_action)
+            reward = self._calculate_majority_reward(yard_action)
         elif self.reward_design == "default":
-             reward = self._calculate_default_reward(yard_action)
+            reward = self._calculate_default_reward(yard_action)
         return reward
 
     def _calculate_default_reward(self, yard_action: int) -> float:
@@ -669,7 +669,9 @@ class StackEnv(gym.Env):
             diff_group_count = np.sum(same_stack_container_groups != container_group)
             total_occupied_in_stack = same_group_count + diff_group_count
             if self.reward_norm and total_occupied_in_stack > 0:
-                reward += ((same_group_count - diff_group_count)/total_occupied_in_stack) * rule_1_multiplier
+                reward += (
+                    (same_group_count - diff_group_count) / total_occupied_in_stack
+                ) * rule_1_multiplier
             else:
                 reward += (same_group_count - diff_group_count) * rule_1_multiplier
 
@@ -707,7 +709,9 @@ class StackEnv(gym.Env):
             diff_group_count = np.sum(same_bay_container_groups != container_group)
             total_occupied_in_bay = same_group_count + diff_group_count
             if self.reward_norm and total_occupied_in_bay > 0:
-                reward += ((same_group_count - diff_group_count)/total_occupied_in_bay) * rule_3_multiplier
+                reward += (
+                    (same_group_count - diff_group_count) / total_occupied_in_bay
+                ) * rule_3_multiplier
             else:
                 reward += (same_group_count - diff_group_count) * rule_3_multiplier
 
@@ -730,7 +734,9 @@ class StackEnv(gym.Env):
             diff_group_count = np.sum(adj_stack_container_groups != container_group)
             total_occupied_adj = same_group_count + diff_group_count
             if self.reward_norm and total_occupied_adj > 0:
-                reward += ((same_group_count - diff_group_count)/total_occupied_adj) * rule_2_multiplier
+                reward += (
+                    (same_group_count - diff_group_count) / total_occupied_adj
+                ) * rule_2_multiplier
             else:
                 reward += (same_group_count - diff_group_count) * rule_2_multiplier
 
@@ -788,7 +794,10 @@ class StackEnv(gym.Env):
         reward = 0.0
 
         # --- Stack rules ---
-        stack_is_empty = (placement_bay, placement_row) not in self.yard_bay_row_occupied
+        stack_is_empty = (
+            placement_bay,
+            placement_row,
+        ) not in self.yard_bay_row_occupied
 
         # Rule 3: penalty for occupying a new (empty) stack
         if stack_is_empty:
@@ -813,10 +822,12 @@ class StackEnv(gym.Env):
                 non_empty_adj_majorities.append(right_maj)
 
         if len(non_empty_adj_majorities) > 0:
-            match_count = sum(1 for m in non_empty_adj_majorities if m == container_group)
+            match_count = sum(
+                1 for m in non_empty_adj_majorities if m == container_group
+            )
             if match_count == len(non_empty_adj_majorities):
                 # Rule 4: all non-empty adjacents match c -> 0
-                reward+= 0.0
+                reward += 0.0
             elif match_count > 0:
                 # Rule 5: exactly one of two matches c
                 reward -= 0.3
@@ -870,7 +881,9 @@ class StackEnv(gym.Env):
         valid_actions = self._get_valid_yard_actions()
         return [action in valid_actions for action in range(self.action_space.n)]
 
-    def _stack_positional_encoding(self, num_stacks: int, max_frequency: int) -> np.ndarray:
+    def _stack_positional_encoding(
+        self, num_stacks: int, max_frequency: int
+    ) -> np.ndarray:
         """
         Create sinusoidal positional encoding for stacks.
         Returns ndarray of shape (num_stacks, 2 * max_frequency).
@@ -965,7 +978,9 @@ class StackEnv(gym.Env):
             )
         elif self.observation_type == "stack_features_simplev2":
             # Simplified stack features with one-hot encoding
-            features_per_stack = 3 * self.group_num + 2  # 3 one-hot groups + num_occupied + stack_index
+            features_per_stack = (
+                3 * self.group_num + 2
+            )  # 3 one-hot groups + num_occupied + stack_index
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
 
             return gym.spaces.Box(
@@ -1074,12 +1089,8 @@ class StackEnv(gym.Env):
                     left_groups = self.yard_state[left_mask, StateIds.GROUP.value]
                     if len(left_groups) > 0:
                         # Find most common group in left row (IS_OCCUPIED already filtered)
-                        left_max_group = np.bincount(
-                            left_groups.astype(int)
-                        ).argmax()
-                        stack_features[
-                            stack_idx, feature_idx + left_max_group
-                        ] = 1.0
+                        left_max_group = np.bincount(left_groups.astype(int)).argmax()
+                        stack_features[stack_idx, feature_idx + left_max_group] = 1.0
                 feature_idx += self.group_num
 
                 # right_row_max_group (one-hot) - right adjacent row in same bay
@@ -1093,12 +1104,8 @@ class StackEnv(gym.Env):
                     right_groups = self.yard_state[right_mask, StateIds.GROUP.value]
                     if len(right_groups) > 0:
                         # Find most common group in right row (IS_OCCUPIED already filtered)
-                        right_max_group = np.bincount(
-                            right_groups.astype(int)
-                        ).argmax()
-                        stack_features[
-                            stack_idx, feature_idx + right_max_group
-                        ] = 1.0
+                        right_max_group = np.bincount(right_groups.astype(int)).argmax()
+                        stack_features[stack_idx, feature_idx + right_max_group] = 1.0
                 feature_idx += self.group_num
 
                 # vessel_remaining_per_group (count of remaining containers per group in vessel)
@@ -1121,7 +1128,9 @@ class StackEnv(gym.Env):
                 if self.pos_embeddings:
                     # sinusoidal positional embedding (2 * max_frequency features, pre-computed)
                     pe_size = 2 * self.yard_shape[1]
-                    stack_features[stack_idx, feature_idx : feature_idx + pe_size] = self.stack_pos_encoding[stack_idx]
+                    stack_features[stack_idx, feature_idx : feature_idx + pe_size] = (
+                        self.stack_pos_encoding[stack_idx]
+                    )
                 else:
                     # scalar positional index
                     stack_features[stack_idx, feature_idx] = stack_idx
@@ -1164,7 +1173,7 @@ class StackEnv(gym.Env):
         for bay in yard_bays:
             for row in yard_rows:
                 feature_idx = 0
-                
+
                 # Find all slots in this stack
                 stack_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & (
                     self.yard_state[:, StateIds.ROW.value] == row
@@ -1178,7 +1187,7 @@ class StackEnv(gym.Env):
                     occupied_groups = stack_slots[occupied_mask, StateIds.GROUP.value]
                     # IS_OCCUPIED already filters empty slots; group 0 is a valid container group
                     max_group = np.bincount(occupied_groups.astype(int)).argmax()
-                
+
                 # Set one-hot encoding for max_group (groups 0 to group_num-1)
                 if max_group >= 0:
                     stack_features[stack_idx, feature_idx + max_group] = 1.0
@@ -1191,7 +1200,9 @@ class StackEnv(gym.Env):
 
                 # Feature: current_container_group (one-hot, same for all stacks; group 0 is valid)
                 if current_container_group >= 0:
-                    stack_features[stack_idx, feature_idx + current_container_group] = 1.0
+                    stack_features[stack_idx, feature_idx + current_container_group] = (
+                        1.0
+                    )
                 feature_idx += self.group_num
 
                 # Feature: left_right_row_max_group (one-hot) - dominant group in adjacent rows
@@ -1226,8 +1237,10 @@ class StackEnv(gym.Env):
                 if len(adjacent_groups) > 0:
                     adjacent_groups_array = np.array(adjacent_groups)
                     # IS_OCCUPIED already filtered; group 0 is a valid container group
-                    left_right_max_group = np.bincount(adjacent_groups_array.astype(int)).argmax()
-                
+                    left_right_max_group = np.bincount(
+                        adjacent_groups_array.astype(int)
+                    ).argmax()
+
                 # Set one-hot encoding for left_right_row_max_group (groups 0 to group_num-1)
                 if left_right_max_group >= 0:
                     stack_features[stack_idx, feature_idx + left_right_max_group] = 1.0

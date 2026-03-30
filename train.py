@@ -27,7 +27,7 @@ def create_env(
     seed: int | None,
     render_mode: str | None,
     parallel: bool,
-    n_parallel_envs: int
+    n_parallel_envs: int,
 ) -> tuple[SubprocVecEnv | StackEnv, ActionMasker]:
     """
     Build training and evaluation environments for the stowage stack task.
@@ -51,16 +51,18 @@ def create_env(
     # Build a separate evaluation config to turn off any reward shaping that would distort the evaluation score.
     eval_config = config.copy()
 
-    eval_config['reward_norm'] = False  # Disable reward normalization for evaluation
-    eval_config['reward_clip'] = False   # Disable reward clipping for evaluation
+    eval_config["reward_norm"] = False  # Disable reward normalization for evaluation
+    eval_config["reward_clip"] = False  # Disable reward clipping for evaluation
 
     if parallel:
         # Create parallel training envs
-        train_env = create_parallel_envs(config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv)
+        train_env = create_parallel_envs(
+            config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv
+        )
         # Evaluation always runs in a single process.
         eval_env = StackEnv(config=eval_config, render_mode=None)
         # in sb3, the eval env must also be masked otherwise model chooses incorrect actions.
-        eval_env = ActionMasker(eval_env, mask_fn) 
+        eval_env = ActionMasker(eval_env, mask_fn)
     else:
         # No parallel training env.
         train_env = StackEnv(config=config, render_mode=render_mode)
@@ -70,6 +72,7 @@ def create_env(
         eval_env = ActionMasker(eval_env, mask_fn)
 
     return train_env, eval_env
+
 
 def create_model(
     train_env: SubprocVecEnv | StackEnv,
@@ -85,7 +88,7 @@ def create_model(
     n_epochs: int = 10,
     lr: float = 3e-4,
     vf_coef: float = 0.5,
-    run: Any = None
+    run: Any = None,
 ) -> MaskablePPO:
     """
     Instantiate a MaskablePPO agent for the stowage stack environment.
@@ -140,7 +143,7 @@ def create_model(
             tanh_clipping=tanh_clipping,
         )
     else:
-        # MLP policy. Critic and actor networks share same backbonne architecture 
+        # MLP policy. Critic and actor networks share same backbonne architecture
         # but have separate heads.
         policy = "MlpPolicy"
         policy_kwargs = dict(net_arch=[256, 256, 32])
@@ -160,10 +163,11 @@ def create_model(
         clip_range=0.2,
         verbose=1,
         device=device,
-        tensorboard_log=f"runs/{run.id}" if run is not None else None
+        tensorboard_log=f"runs/{run.id}" if run is not None else None,
     )
 
     return model
+
 
 def create_callbacks(
     eval_env: ActionMasker,
@@ -176,10 +180,10 @@ def create_callbacks(
     run: Any = None,
 ) -> CallbackList:
     """
-    Build the SB3 CallbackList used during model training for evaluation metrics 
+    Build the SB3 CallbackList used during model training for evaluation metrics
     and model saving.
 
-    Model is saved whenever a new best mean evaluation reward is achieved, 
+    Model is saved whenever a new best mean evaluation reward is achieved,
 
     The MaskedEvalCallback periodically rolls out the
     current policy on the evaluation environment and saves the
@@ -192,7 +196,7 @@ def create_callbacks(
         save_model_flag (bool): Whether to save the best model to disk.
         save_dir (str): Directory in which to save the best model checkpoint.
         save_filename (str): Base filename for the checkpoint (without extension).
-        max_reward_threshold (float | None): Used during evaluation to 
+        max_reward_threshold (float | None): Used during evaluation to
                  compute the percentage of episodes that achieve perfect episode for given yard.
         run: Active W&B run object, or None to skip W&B logging.
 
@@ -207,7 +211,7 @@ def create_callbacks(
         save_best_model=save_model_flag,
         save_dir=save_dir,
         save_filename=save_filename,
-        max_reward_threshold=max_reward_threshold
+        max_reward_threshold=max_reward_threshold,
     )
 
     callback_list = [eval_callback]
@@ -218,6 +222,7 @@ def create_callbacks(
     callbacks = CallbackList(callback_list)
 
     return callbacks
+
 
 def train(
     config: dict,
@@ -258,7 +263,7 @@ def train(
         save_model_flag (bool): Save the model or not.
         save_dir (str): Directory for model checkpoints.
         save_filename (str): Base filename for saved checkpoints.
-        max_reward_threshold (float | None): Used during evaluation to 
+        max_reward_threshold (float | None): Used during evaluation to
                  compute the percentage of episodes that achieve perfect episode for given yard.
         use_transformer (bool): Use Transformer Pointer Network architecture.
         embed_dim (int): Transformer encoder embedding dimension.
@@ -275,25 +280,42 @@ def train(
 
     # Build environments
     train_env, eval_env = create_env(
-        config, seed=seed, render_mode=render_mode,
-        parallel=parallel, n_parallel_envs=n_parallel_envs
+        config,
+        seed=seed,
+        render_mode=render_mode,
+        parallel=parallel,
+        n_parallel_envs=n_parallel_envs,
     )
 
     # Build model
     model = create_model(
-        train_env, config, device,
-        parallel=parallel, n_parallel_envs=n_parallel_envs,
-        use_transformer=use_transformer, embed_dim=embed_dim,
-        n_heads=n_heads, n_layers=n_layers, vf_dim=vf_dim,
-        tanh_clipping=tanh_clipping, n_epochs=n_epochs,
-        lr=lr, vf_coef=vf_coef, run=run
+        train_env,
+        config,
+        device,
+        parallel=parallel,
+        n_parallel_envs=n_parallel_envs,
+        use_transformer=use_transformer,
+        embed_dim=embed_dim,
+        n_heads=n_heads,
+        n_layers=n_layers,
+        vf_dim=vf_dim,
+        tanh_clipping=tanh_clipping,
+        n_epochs=n_epochs,
+        lr=lr,
+        vf_coef=vf_coef,
+        run=run,
     )
 
     # Initialize callbacks
     callbacks = create_callbacks(
-        eval_env, eval_freq, n_eval_episodes,
-        save_model_flag, save_dir, save_filename,
-        max_reward_threshold=max_reward_threshold, run=run
+        eval_env,
+        eval_freq,
+        n_eval_episodes,
+        save_model_flag,
+        save_dir,
+        save_filename,
+        max_reward_threshold=max_reward_threshold,
+        run=run,
     )
 
     # Train

@@ -10,6 +10,7 @@ import torch
 
 import numpy as np
 
+
 class MaskedEvalCallback(BaseCallback):
     """Evaluation callback with action masking support and best-model saving."""
 
@@ -49,9 +50,11 @@ class MaskedEvalCallback(BaseCallback):
                     action, _ = self.model.predict(
                         obs,
                         deterministic=True,
-                        action_masks=get_action_masks(self.eval_env)
+                        action_masks=get_action_masks(self.eval_env),
                     )
-                    obs, reward, terminated, truncated, info = self.eval_env.step(action)
+                    obs, reward, terminated, truncated, info = self.eval_env.step(
+                        action
+                    )
                     total_reward += reward
 
                 all_rewards.append(total_reward)
@@ -72,8 +75,14 @@ class MaskedEvalCallback(BaseCallback):
             print(f"Max Reward:  {max_reward:.4f}")
 
             if self.max_reward_threshold is not None:
-                pct = np.sum(all_rewards >= self.max_reward_threshold) / self.n_eval_episodes * 100
-                print(f"% episodes >= threshold ({self.max_reward_threshold}): {pct:.2f}%")
+                pct = (
+                    np.sum(all_rewards >= self.max_reward_threshold)
+                    / self.n_eval_episodes
+                    * 100
+                )
+                print(
+                    f"% episodes >= threshold ({self.max_reward_threshold}): {pct:.2f}%"
+                )
 
             print("=" * 70)
 
@@ -81,7 +90,6 @@ class MaskedEvalCallback(BaseCallback):
             self.logger.record("eval/std_reward", std_reward)
             self.logger.record("eval/min_reward", min_reward)
             self.logger.record("eval/max_reward", max_reward)
-
 
             if self.max_reward_threshold is not None:
                 self.logger.record("eval/pct_above_threshold", pct)
@@ -93,10 +101,13 @@ class MaskedEvalCallback(BaseCallback):
                 path = f"{self.save_dir}/{self.save_filename}_best"
                 self.model.save(path)
                 if self.verbose:
-                    print(f"New best model saved to {path} (mean reward: {mean_reward:.4f})")
+                    print(
+                        f"New best model saved to {path} (mean reward: {mean_reward:.4f})"
+                    )
 
         return True
-    
+
+
 class SaveModelCallback(BaseCallback):
     """Callback to periodically save the model, overwriting the previous save.
     Not being used currently (currently modle is saved withtin MaskedEvalCallback).
@@ -121,11 +132,11 @@ class SaveModelCallback(BaseCallback):
             if self.verbose:
                 print(f"Model saved to {path} at step {self.num_timesteps}")
         return True
-    
-    
+
+
 def mask_fn(env: ActionMasker) -> np.ndarray:
     """Extract action mask from environment for MaskablePPO.
-        Needed for sb3_contrib action masking to work"""
+    Needed for sb3_contrib action masking to work"""
     return env.action_masks()
 
 
@@ -140,18 +151,22 @@ def make_env(config: dict, rank: int = 0) -> Callable[[], ActionMasker]:
     Returns:
         Wrapped environment.
     """
+
     def _init() -> ActionMasker:
         env_config = config.copy()
-        if env_config.get('seed') is not None:
-            env_config['seed'] = config['seed'] + rank
+        if env_config.get("seed") is not None:
+            env_config["seed"] = config["seed"] + rank
 
         env = StackEnv(config=env_config, render_mode=None)
         env = ActionMasker(env, mask_fn)
-        env.reset(seed=env_config.get('seed'))  # Explicitly seed first reset with rank offset
+        env.reset(
+            seed=env_config.get("seed")
+        )  # Explicitly seed first reset with rank offset
 
         return env
 
     return _init
+
 
 def create_parallel_envs(
     config: dict,
@@ -175,9 +190,6 @@ def create_parallel_envs(
     return vec_env
 
 
-
-
-
 def save_model(model: MaskablePPO, dir: str, filename: str) -> None:
     """Utility function to save the trained model"""
     model.save(f"{dir}/{filename}")
@@ -196,7 +208,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "seed": seed,
             "observation_type": "stack_features",
             "reward_norm": True,
-            "reward_clip": True
+            "reward_clip": True,
         }
     elif size == "medium":
         config = {
@@ -208,7 +220,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "seed": seed,
             "observation_type": "stack_features",
             "reward_norm": True,
-            "reward_clip": True
+            "reward_clip": True,
         }
     elif size == "large":
         config = {
@@ -220,12 +232,13 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "seed": seed,
             "observation_type": "stack_features",
             "reward_norm": True,
-            "reward_clip": True
+            "reward_clip": True,
         }
     else:
         raise ValueError("Invalid size. Choose 'small', 'medium', or 'large'.")
-    
+
     return config
+
 
 def get_device() -> str:
     """Utility function to get the available device (GPU or CPU)"""
