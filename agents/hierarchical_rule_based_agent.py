@@ -12,18 +12,16 @@ class AgentLevel(Enum):
 class BaseAgent(ABC):
     """
     Base class for hierarchical agents using abstract class
-    
+
     Attributes:
-        level: The hierarchical level of this agent (HIGH_LEVEL or LOW_LEVEL)
-        verbosity: Verbosity level for debug output (0: silent, 1: verbose)
+        level: The hierarchical level of the agent (HIGH_LEVEL or LOW_LEVEL)
     """
 
-    def __init__(self, level: AgentLevel, verbosity: int = 0) -> None:
+    def __init__(self, level: AgentLevel) -> None:
         self.level = level
-        self.verbosity = verbosity  # 0: silent, 1: verbose
 
     @abstractmethod
-    def get_action(self, observation: dict | np.ndarray, valid_actions: np.ndarray) -> int | None:
+    def get_action(self, observation: dict, valid_actions: np.ndarray) -> int:
         """
         Return action from agent based on observation
         
@@ -37,7 +35,7 @@ class BaseAgent(ABC):
         pass
 
     @abstractmethod
-    def update_agent(self, reward: float, info: dict | None = None) -> None:
+    def update_agent(self, reward: float) -> None:
         """
         Update agent based on feedback
         
@@ -53,22 +51,23 @@ class HighLevelAgent(BaseAgent):
     High-Level Agent in the Hierarchical learning framework
     This agent selects the bay for container placement
     Currently it receives as input the full observation from environment (maybe changed later)
-    
+
     Attributes:
-        level: AgentLevel.HIGH_LEVEL (inherited from BaseAgent)
-        verbosity: Verbosity level for debug output (0: silent, 1: verbose)
-        vessel_shape: Tuple of (num_bays, num_rows, num_tiers) for vessel
-        yard_shape: Tuple of (num_bays, num_rows, num_tiers) for yard
-        policy_type: Type of policy ("rule_based", "rule_based_grouped", or "random")
-        num_slot_attrs: Number of attributes per slot in state representation
-        episode_history: List of episode records with rewards and info
+        vessel_shape: Tuple defining vessel dimensions (bays, rows, tiers)
+        yard_shape: Tuple defining yard dimensions (bays, rows, tiers)
+        policy_type: Type of policy for decision making ("rule_based", "rule_based_grouped", "random", or "rl_agent")
+        num_slot_attrs: Number of attributes per slot (5: bay, row, tier, is_occupied, group)
+        episode_history: List of episode experiences for learning
     """
 
     def __init__(
-        self, vessel_shape: tuple, yard_shape: tuple, num_slot_attrs: int, 
-        policy_type: str = "rule_based", verbosity: int = 0
+        self,
+        vessel_shape: tuple[int, int, int],
+        yard_shape: tuple[int, int, int],
+        num_slot_attrs: int,
+        policy_type: str = "rule_based",
     ) -> None:
-        super().__init__(AgentLevel.HIGH_LEVEL, verbosity=verbosity)
+        super().__init__(AgentLevel.HIGH_LEVEL)
 
         # Initialize parameters from environment
         self.vessel_shape = vessel_shape
@@ -86,16 +85,83 @@ class HighLevelAgent(BaseAgent):
         )
         self.total_yard_coords = self.num_yard_bay * yard_shape[1] * yard_shape[2]
 
-    def get_action(self, observation: dict | np.ndarray, valid_actions: np.ndarray) -> int | None:
+    def _action_to_bay_row(self, action):
         """
-        Select a bay for container placement based on the selected policy
-        
-        Args:
-            observation: Environment observation (dict or flattened array)
-            valid_actions: Array of valid action indices
-            
+        Convert action index (stack) to bay and row numbering
+        Action index x = ((b-1)/2)*n + (r-1)
+        where b is odd bay number (1,3,5,...), r is row number (1,2,...,n), n is num_rows
+
         Returns:
-            Selected bay number or None if no valid action
+            tuple: (bay, row) where bay is odd bay number (1,3,5,...) and row is 1-indexed
+        """
+        n = self.yard_shape[StateIds.ROW.value]  # num_rows
+        bay_idx = action // n  # which physical bay (0-indexed)
+        row_idx = action % n  # which row (0-indexed)
+
+        # Convert to actual bay number (1,3,5,7,...)
+        bay = 2 * bay_idx + 1
+        row = row_idx + 1
+
+        return bay, row
+
+    def _bay_row_to_action(self, bay, row):
+        """
+        Convert (bay, row) numbering pair to action index (stack)
+        Action index x = ((b-1)/2)*n + (r-1)
+
+        Args:
+            bay: odd bay number (1,3,5,7,...)
+            row: row number (1,2,3,...)
+
+        Returns:
+            int: action index
+        """
+        n = self.yard_shape[StateIds.ROW.value]  # num_rows
+        action = ((bay - 1) // 2) * n + (row - 1)
+        return action
+
+    def _get_valid_bays(self, valid_actions: list[int]) -> set:
+        """
+        Extract unique bay numbers from valid action indices
+
+        Args:
+            valid_actions: List or array of valid action indices
+
+        Returns:
+            Set of valid bay numbers
+        """
+        valid_bays = set()
+        for action in valid_actions:
+            bay, row = self._action_to_bay_row(action)
+            valid_bays.add(bay)
+        return valid_bays
+
+    def _get_valid_bay_row_pairs(self, valid_actions: list[int]) -> list:
+        """
+        Extract all valid (bay, row) pairs from action indices
+
+        Args:
+            valid_actions: Array or list of valid action indices
+
+        Returns:
+            List of (bay, row) tuples
+        """
+        bay_row_pairs = []
+        for action in valid_actions:
+            bay, row = self._action_to_bay_row(action)
+            bay_row_pairs.append((bay, row))
+        return bay_row_pairs
+
+    def get_action(self, observation: dict, valid_actions: list[int]) -> int:
+        """
+        Select an action (bay) based on the specified policy and observation
+
+        Args:
+            observation: Current environment observation containing yard state and current container
+            valid_actions: List of valid action indices
+
+        Returns:
+            Selected bay number
         """
         # Select policy based on type
         if self.policy_type == "rule_based":
@@ -104,62 +170,61 @@ class HighLevelAgent(BaseAgent):
             return self._rule_based_grouped_policy(observation, valid_actions)
         elif self.policy_type == "random":
             return self._random_policy(observation, valid_actions)
+        elif self.policy_type == "rl_agent":
+            # Placeholder for future RL-based high-level agent
+            raise NotImplementedError("RL-based high-level agent not implemented yet.")
         else:
             raise ValueError(f"Unknown policy type: {self.policy_type}")
 
-    def _random_policy(self, observation: dict | np.ndarray, valid_actions: np.ndarray) -> int | None:
+    def _random_policy(self, observation: dict, valid_actions: list[int]) -> int:
         """
-        Policy selects a random bay from valid actions
-        
+        Policy that selects a random bay from valid action bays
+
         Args:
-            observation: Environment observation (dict or flattened array)
-            valid_actions: Array of valid action indices
-            
+            observation: Current environment observation
+            valid_actions: List of valid action indices indicating each stack
+
         Returns:
-            Randomly selected bay number or None if no valid actions
+            Randomly selected bay number
         """
         if len(valid_actions) == 0:
-            return None
+            raise RuntimeError("No valid actions available for the high level agent.")
 
-        # Get parsed yard state from observation
-        yard_state = self._parse_yard_state(observation)
-
-        # Extarct only valid bays using valid actions
-        bays_in_valid_actions = yard_state[valid_actions, StateIds.BAY.value]
+        # Extract valid bays from action indices
+        valid_bays = self._get_valid_bays(valid_actions)
 
         # Fallback
-        if len(bays_in_valid_actions) == 0:
-            return None
+        if len(valid_bays) == 0:
+            raise RuntimeError("No valid actions available for the high level agent.")
 
-        return np.random.choice(bays_in_valid_actions)
+        return np.random.choice(list(valid_bays))
 
-    def _rule_based_policy(self, observation: dict | np.ndarray, valid_actions: np.ndarray) -> int | None:
+    def _rule_based_policy(self, observation: dict, valid_actions: list[int]) -> int:
         """
-        Select bay with heuristics for container grouping
-        
-        Implements three fallback rules:
-        1. Select bay with stack having most same-group containers (not full)
-        2. Select bay with most empty stacks
-        3. Select any valid bay with available space
-        
+        Select bay with stacks having most similar count of same-group containers (not full)
+        Does not account for grouping similar containers in nearby stacks (bay,row)
+
         Args:
-            observation: Environment observation (dict or flattened array)
+            observation: Current environment observation containing yard state and current container
             valid_actions: Array of valid action indices
-            
+
         Returns:
-            Selected bay number or None if no valid action
+            Selected bay number
         """
         # Fallback for no valid actions
         if len(valid_actions) == 0:
-            raise ValueError("No valid actions available for high-level agent. This should not happen during normal operation.")
+            raise RuntimeError("No valid actions available for the high level agent.")
 
         # Get parsed yard state and current container info from observation
-        yard_state = self._parse_yard_state(observation)
-        current_container = self._parse_current_container(observation)
+        if not isinstance(observation, dict) :
+            raise ValueError("Expected observation to be a dictionary with 'yard_state' and 'current_container' keys.")
+        
+        yard_state = observation["yard_state"]
+        current_container = observation["current_container"]
         container_group = int(current_container[StateIds.GROUP.value])
 
-        # Get valid bays from valid actions
-        valid_bays = set(yard_state[valid_actions, StateIds.BAY.value].astype(int))
+        # Get valid bays from action indices
+        valid_bays = self._get_valid_bays(valid_actions)
 
         # Get max tier number possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
@@ -227,26 +292,35 @@ class HighLevelAgent(BaseAgent):
 
         return best_bay
 
-    def _rule_based_grouped_policy(self, observation: dict | np.ndarray, valid_actions: np.ndarray) -> int | None:
+    def _rule_based_grouped_policy(
+        self, observation: dict, valid_actions: list[int]
+    ) -> int:
         """
         Select bay with stacks having most similar count of same-group containers (not full)
         Uses overall occupancy and grouping within bays to select best bay
         1. Select bay with stack having most same-group containers (not full)
         2. If no bay found in Rule 1, select bay with most same-group containers
         3. If no bay found in Rule 2, select bay with least containers overall
+
+        Args:
+            observation: Current environment observation containing yard state and current container
+            valid_actions: Array of valid action indices
+
+        Returns:
+            Selected bay number
         """
 
         # Fallback for no valid actions
         if len(valid_actions) == 0:
-            return None
+            raise RuntimeError("No valid actions available for the high level agent.")
 
         # Get parsed yard state and current container info from observation
-        yard_state = self._parse_yard_state(observation)
-        current_container = self._parse_current_container(observation)
+        yard_state = observation["yard_state"]
+        current_container = observation["current_container"]
         container_group = int(current_container[StateIds.GROUP.value])
 
-        # Get valid bays from valid actions
-        valid_bays = set(yard_state[valid_actions, StateIds.BAY.value].astype(int))
+        # Get valid bays from action indices
+        valid_bays = self._get_valid_bays(valid_actions)
 
         # Get max tier number possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
@@ -330,58 +404,10 @@ class HighLevelAgent(BaseAgent):
 
         return best_bay
 
-    def _parse_yard_state(self, observation: dict | np.ndarray) -> np.ndarray:
+    def update_agent(self, reward: float, info: dict) -> None:
         """
-        Extract yard state from observation.
-        Handles both array and dictionary observation types.
-        
-        Args:
-            observation: Environment observation (dict or flattened array)
-            
-        Returns:
-            Yard state array in shape (total_yard_coords, num_slot_attrs)
-        """
-        if isinstance(observation, dict):
-            # Dictionary observation type - yard_state is already provided
-            return observation["yard_state"].astype(int)
-        else:
-            # Array observation type - need to parse from flattened array
-            observation = observation.astype(int)
-            vessel_end = self.total_vessel_coords * self.num_slot_attrs
-            yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
+        Update agent by storing episode experience
 
-            yard_state = observation[vessel_end:yard_end].reshape(
-                self.total_yard_coords, self.num_slot_attrs
-            )
-            return yard_state
-
-    def _parse_current_container(self, observation: dict | np.ndarray) -> np.ndarray:
-        """
-        Extract current container state from observation.
-        Handles both array and dictionary observation types.
-        
-        Args:
-            observation: Environment observation (dict or flattened array)
-            
-        Returns:
-            Current container state array in shape (num_slot_attrs,)
-        """
-        if isinstance(observation, dict):
-            # Dictionary observation type - current_container is already provided
-            return observation["current_container"].astype(int)
-        else:
-            # Array observation type - need to parse from flattened array
-            observation = observation.astype(int)
-            vessel_end = self.total_vessel_coords * self.num_slot_attrs
-            yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
-
-            current_container = observation[yard_end : yard_end + self.num_slot_attrs]
-            return current_container
-
-    def update_agent(self, reward: float, info: dict | None = None) -> None:
-        """
-        Update agent based on feedback signal
-        
         Args:
             reward: Reward signal from environment
             info: Additional information dictionary
@@ -394,22 +420,23 @@ class LowLevelAgent(BaseAgent):
     Low-Level Agent in the Hierarchical learning framework
     This agent selects the specific slot (row) within the chosen bay for container placement
     Currently it receives as input the full observation from environment (maybe changed later)
-    
+
     Attributes:
-        level: AgentLevel.LOW_LEVEL (inherited from BaseAgent)
-        verbosity: Verbosity level for debug output (0: silent, 1: verbose)
-        vessel_shape: Tuple of (num_bays, num_rows, num_tiers) for vessel
-        yard_shape: Tuple of (num_bays, num_rows, num_tiers) for yard
-        policy_type: Type of policy ("rule_based", "rule_based_grouped", or "random")
-        num_slot_attrs: Number of attributes per slot in state representation
-        episode_history: List of episode records with rewards and info
+        vessel_shape: Tuple defining vessel dimensions (bays, rows, tiers)
+        yard_shape: Tuple defining yard dimensions (bays, rows, tiers)
+        policy_type: Type of policy for decision making ("rule_based", "rule_based_grouped", "random", or "rl_agent")
+        num_slot_attrs: Number of attributes per slot (5: bay, row, tier, is_occupied, group)
+        episode_history: List of episode experiences for learning
     """
 
     def __init__(
-        self, vessel_shape: tuple, yard_shape: tuple, num_slot_attrs: int, 
-        policy_type: str = "rule_based", verbosity: int = 0
+        self,
+        vessel_shape: tuple[int, int, int],
+        yard_shape: tuple[int, int, int],
+        num_slot_attrs: int,
+        policy_type: str = "rule_based",
     ) -> None:
-        super().__init__(AgentLevel.LOW_LEVEL, verbosity=verbosity)
+        super().__init__(AgentLevel.LOW_LEVEL)
 
         # Initialize parameters from environment
         self.vessel_shape = vessel_shape
@@ -427,17 +454,54 @@ class LowLevelAgent(BaseAgent):
         )
         self.total_yard_coords = self.num_yard_bay * yard_shape[1] * yard_shape[2]
 
-    def get_action(self, observation: dict | np.ndarray, valid_actions: np.ndarray, selected_bay: int) -> int | None:
+    def _action_to_bay_row(self, action):
         """
-        Select a slot (row) within the selected bay
-        
-        Args:
-            observation: Environment observation (dict or flattened array)
-            valid_actions: Array of valid action indices
-            selected_bay: Bay number selected by high-level agent
-            
+        Convert action index (stack) to bay and row numbering
+        Action index x = ((b-1)/2)*n + (r-1)
+        where b is odd bay number (1,3,5,...), r is row number (1,2,...,n), n is num_rows
+
         Returns:
-            Selected slot index or None if no valid action
+            tuple: (bay, row) where bay is odd bay number (1,3,5,...) and row is 1-indexed
+        """
+        n = self.yard_shape[StateIds.ROW.value]  # num_rows
+        bay_idx = action // n  # which physical bay (0-indexed)
+        row_idx = action % n  # which row (0-indexed)
+
+        # Convert to actual bay number (1,3,5,7,...)
+        bay = 2 * bay_idx + 1
+        row = row_idx + 1
+
+        return bay, row
+
+    def _bay_row_to_action(self, bay: int, row: int) -> int:
+        """
+        Convert (bay, row) numbering pair to action index (stack)
+        Action index x = ((b-1)/2)*n + (r-1)
+
+        Args:
+            bay: odd bay number (1,3,5,7,...)
+            row: row number (1,2,3,...)
+
+        Returns:
+            int: action index
+        """
+        n = self.yard_shape[StateIds.ROW.value]  # num_rows
+        action = ((bay - 1) // 2) * n + (row - 1)
+        return action
+
+    def get_action(
+        self, observation: dict, valid_actions: list[int], selected_bay: int
+    ) -> int:
+        """
+        Select an action (row) within the selected bay based on the specified policy
+
+        Args:
+            observation: Current environment observation containing yard state and current container
+            valid_actions: List of valid action indices
+            selected_bay: Bay selected by the high-level agent
+
+        Returns:
+            Selected action (row) index
         """
         # Select policy based on type
         if self.policy_type == "rule_based":
@@ -448,60 +512,69 @@ class LowLevelAgent(BaseAgent):
             )
         elif self.policy_type == "random":
             return self._random_policy(observation, valid_actions, selected_bay)
+        elif self.policy_type == "rl_agent":
+            # Placeholder for future RL-based low-level agent
+            pass
         else:
             raise ValueError(f"Unknown policy type: {self.policy_type}")
 
-    def _random_policy(self, observation: dict | np.ndarray, valid_actions: np.ndarray, selected_bay: int) -> int | None:
+    def _random_policy(
+        self, observation: dict, valid_actions: list[int], selected_bay: int
+    ) -> int:
         """
-        Policy selects a random valid slot (row) within the selected bay
-        
+        Policy that selects a random valid action (stack) within the selected bay
+
         Args:
-            observation: Environment observation (dict or flattened array)
-            valid_actions: Array of valid action indices
-            selected_bay: Bay number selected by high-level agent
-            
+            observation: Current environment observation
+            valid_actions: List of valid action indices
+            selected_bay: Bay selected by the high-level agent
+
         Returns:
-            Selected slot index or None if no valid actions in bay
+            Randomly selected action within the bay
         """
         # Fallback for no valid actions
         if len(valid_actions) == 0:
-            return None
+            raise RuntimeError("No valid actions available for the low level agent.")
 
-        # Get parsed yard state from observation
-        yard_state = self._parse_yard_state(observation)
-
-        # Selecting only rows that are valid and within selected bay
-        bay_mask = yard_state[valid_actions, StateIds.BAY.value] == selected_bay
-        bay_valid_actions = np.array(valid_actions)[bay_mask]
+        # Filter valid actions to only those in selected bay
+        bay_valid_actions = []
+        for action in valid_actions:
+            bay, row = self._action_to_bay_row(action)
+            if bay == selected_bay:
+                bay_valid_actions.append(action)
 
         # Fallback for no valid actions in selected bay
         if len(bay_valid_actions) == 0:
-            return None
-        else:
-            return np.random.choice(bay_valid_actions)
+            raise RuntimeError(
+                "No valid actions available in selected bay for the low level agent."
+            )
 
-    def _rule_based_policy(self, observation: dict | np.ndarray, valid_actions: np.ndarray, selected_bay: int) -> int | None:
+        return np.random.choice(bay_valid_actions)
+
+    def _rule_based_policy(
+        self, observation: dict, valid_actions: list[int], selected_bay: int
+    ) -> int:
         """
-        Policy selects the best slot (row) within the selected bay based on count of same group containers
-        
-        Implements five fallback rules for optimal placement within selected bay.
-        
+        Policy that selects the best action (stack) within the selected bay based on count of same-group containers
+
         Args:
-            observation: Environment observation (dict or flattened array)
-            valid_actions: Array of valid action indices
-            selected_bay: Bay number selected by high-level agent
-            
+            observation: Current environment observation containing yard state and current container
+            valid_actions: List of valid action indices
+            selected_bay: Bay selected by the high-level agent
+
         Returns:
-            Selected slot index or None if no valid action
+            Selected action (row) within the bay
         """
 
         # Fallback for no valid actions
         if len(valid_actions) == 0:
-            return None
+            raise RuntimeError(
+                "No valid actions available for the current state in low level agent."
+            )
 
         # Get parsed yard state and current container info from observation
-        yard_state = self._parse_yard_state(observation)
-        current_container = self._parse_current_container(observation)
+        yard_state = observation["yard_state"]
+        current_container = observation["current_container"]
         container_group = int(current_container[StateIds.GROUP.value])
 
         # Mask to get only slots in selected bay
@@ -528,8 +601,8 @@ class LowLevelAgent(BaseAgent):
                 if group == container_group:
                     stacks_info[row]["same_group"] += 1
 
-        best_action = None
-        fallback_best_action = None
+        best_row = None
+        fallback_best_row = None
         best_stack_score = 0
 
         # Rule 1 : Select stack (row) with most same-group containers (not full)
@@ -539,60 +612,64 @@ class LowLevelAgent(BaseAgent):
 
             if not is_full and stack_data["same_group"] > best_stack_score:
                 best_stack_score = stack_data["same_group"]
-                best_action = row
+                best_row = row
 
         # Rule 2 : If no stack found in Rule 1, select first fully empty stack
-        if best_action is None:
+        if best_row is None:
             for row, stack_data in stacks_info.items():
                 is_full = stack_data["occupied"] == max_tier
                 is_empty = stack_data["occupied"] == 0
                 if is_empty:
-                    best_action = row
+                    best_row = row
                     break
                 if not is_full:
-                    fallback_best_action = row
+                    fallback_best_row = row
 
         # Rule 3 : If no stack found in Rule 2, select any available stack (not full)
-        if best_action is None and fallback_best_action is not None:
-            best_action = fallback_best_action
+        if best_row is None and fallback_best_row is not None:
+            best_row = fallback_best_row
 
-        if self.verbosity >= 1:
-            print("Best action (row):", best_action)
+        # Convert selected (bay, row) to action index
+        if best_row is not None:
+            return self._bay_row_to_action(selected_bay, best_row)
 
-        # Get valid action indices (row number of yard_state) for the selected best action (row) within the selected bay
-        valid_action_mask = (yard_state[:, StateIds.BAY.value] == selected_bay) & (
-            yard_state[:, StateIds.ROW.value] == best_action
-        )
-        valid_action_indices = np.where(valid_action_mask)[0]
+        # Fallback: return first valid action in selected bay
+        for action in valid_actions:
+            bay, row = self._action_to_bay_row(action)
+            if bay == selected_bay:
+                return action
 
-        valid_action_indices = [
-            int(action) for action in valid_action_indices if action in valid_actions
-        ]
+        raise RuntimeError("No valid action found in selected bay")
 
-        return valid_action_indices[0]
-
-    def _rule_based_grouped_policy(self, observation: dict | np.ndarray, valid_actions: np.ndarray, selected_bay: int) -> int | None:
+    def _rule_based_grouped_policy(
+        self, observation: dict, valid_actions: list[int], selected_bay: int
+    ) -> int:
         """
-        Policy selects the best slot (row) within the selected bay with improved grouping heuristics
-        
-        Objective is to group similar containers together while ensuring spacing between different groups.
-        Implements multiple rules for optimal placement within selected bay.
-        
+        Policy that selects the best slot (row) within the selected bay based on multiple rules
+        Objective is to group similar containers together while ensuring spacing between different groups
+
+        Rules applied in order:
+        1. Select stack with most same-group containers (not full)
+        2. If no stack found in Rule 1 and bay is completely empty, select first empty stack
+        3. If no stack found in Rule 2, select first empty stack closest to stack with most same-group containers
+        4. If no stack found in Rule 3, select last empty stack among consecutive empty stacks for spacing
+        5. If no stack found in Rule 4, select any available stack that is not full
+
         Args:
-            observation: Environment observation (dict or flattened array)
-            valid_actions: Array of valid action indices
-            selected_bay: Bay number selected by high-level agent
-            
+            observation: Current environment observation containing yard state and current container
+            valid_actions: List of valid action indices
+            selected_bay: Bay selected by the high-level agent
+
         Returns:
-            Selected slot index or None if no valid action
+            Selected action (row) within the bay
         """
         # Fallback for no valid actions
         if len(valid_actions) == 0:
-            return None
+            raise RuntimeError("No valid actions available for the low level agent.")
 
         # Get parsed yard state and current container info from observation
-        yard_state = self._parse_yard_state(observation)
-        current_container = self._parse_current_container(observation)
+        yard_state = observation["yard_state"]
+        current_container = observation["current_container"]
         container_group = int(current_container[StateIds.GROUP.value])
 
         # Mask to get only slots in selected bay
@@ -699,50 +776,64 @@ class LowLevelAgent(BaseAgent):
                     best_action = (selected_bay, row)
                     break
 
-        if self.verbosity >= 1:
-            print("Best action (bay,row):", best_action)
+        if best_action is None:
+            # Fallback: return first valid action in selected bay
+            for action in valid_actions:
+                bay, row = self._action_to_bay_row(action)
+                if bay == selected_bay:
+                    return action
+            raise RuntimeError("No valid action found in selected bay")
 
-        # Get valid action indices (row number of yard_state) for the selected best action (row) within the selected bay
-        valid_action_mask = (yard_state[:, StateIds.BAY.value] == best_action[0]) & (
-            yard_state[:, StateIds.ROW.value] == best_action[1]
-        )
-        valid_action_indices = np.where(valid_action_mask)[0]
+        # Convert (bay, row) to action index
+        return self._bay_row_to_action(best_action[0], best_action[1])
 
-        valid_action_indices = [
-            int(action) for action in valid_action_indices if action in valid_actions
-        ]
-
-        return valid_action_indices[0]
-
-    def _score_based_policy(self, observation, valid_actions, selected_bay):
+    def _score_based_policy(
+        self, observation: dict, valid_actions: list[int], selected_bay: int
+    ) -> int:
         """
-        Not being used currently but kept for future reference
-        Policy selects the best slot (row) within the selected bay based on scoring function
+        Policy that selects the best action (stack) within the selected bay based on scoring function
+
+        Note: Currently not being used but kept for future reference
+
+        Args:
+            observation: Current environment observation
+            valid_actions: List of valid action indices
+            selected_bay: Bay selected by the high-level agent
+
+        Returns:
+            Selected action
         """
 
         if len(valid_actions) == 0:
-            return None
+            raise RuntimeError("No valid actions available for the low level agent.")
 
-        yard_state = self._parse_yard_state(observation)
-        current_container = self._parse_current_container(observation)
+        yard_state = observation["yard_state"]
+        current_container = observation["current_container"]
 
         container_group = int(current_container[StateIds.GROUP.value])
 
         # Filter valid actions to only those in the selected bay
         valid_bay_actions = []
         for action in valid_actions:
-            if yard_state[action, StateIds.BAY.value] == selected_bay:
+            bay, row = self._action_to_bay_row(action)
+            if bay == selected_bay:
                 valid_bay_actions.append(action)
 
         # Get best action based on scoring function
         if len(valid_bay_actions) == 0:
-            return None
+            raise RuntimeError("No valid actions available for the low level agent.")
         else:
             max_action_score = -np.inf
             best_action = None
             for action in valid_bay_actions:
+                bay, row = self._action_to_bay_row(action)
                 group_score = self._score_slots(
-                    action, yard_state, current_container, container_group, selected_bay
+                    bay,
+                    row,
+                    yard_state,
+                    current_container,
+                    container_group,
+                    selected_bay,
                 )
 
                 if group_score > max_action_score:
@@ -752,22 +843,37 @@ class LowLevelAgent(BaseAgent):
             return best_action
 
     def _score_slots(
-        self, action, yard_state, current_container, container_group, selected_bay
-    ):
+        self,
+        bay: int,
+        row: int,
+        yard_state: np.ndarray,
+        current_container: np.ndarray,
+        container_group: int,
+        selected_bay: int,
+    ) -> float:
         """
-        Scoring function to evaluate a slot (row) within a bay for container placement
-        This is used by _score_based_policy() method (curently not in use)
-        The scoring is based on:
-        1. Occupying completely empty stacks is penalized (-0.5)
-        2. Number of same-group containers in the same stack (bay,row) with weightage +/-1
-        3. Number of same-group containers in other stacks in the same bay with weightage (+/-0.25)
-        4. Number of same-group containers in adjacent stacks (bay, row+-1) with weightage (+/-0.5)
+        Scoring function to evaluate a stack (bay, row) within a bay for container placement
+        Currently not in use but kept for future reference
+
+        Scoring basis:
+        1. Occupying completely empty stacks: -0.5
+        2. Same-group containers in same stack: +/-1
+        3. Same-group containers in other stacks in same bay: +/-0.25
+        4. Same-group containers in adjacent stacks: +/-0.5
+
+        Args:
+            bay: Bay number
+            row: Row number
+            yard_state: Current yard state array
+            current_container: Current container being placed
+            container_group: Group of current container
+            selected_bay: Selected bay from high-level agent
+
+        Returns:
+            Score value
         """
 
         group_score = 0
-        bay = yard_state[action, StateIds.BAY.value]
-        row = yard_state[action, StateIds.ROW.value]
-        tier = yard_state[action, StateIds.TIER.value]
 
         stack_mask = (yard_state[:, StateIds.BAY.value] == bay) & (
             yard_state[:, StateIds.ROW.value] == row
@@ -837,19 +943,18 @@ class LowLevelAgent(BaseAgent):
 
         return group_score
 
-    def _pick_last_sorted(self, nums: list[int]) -> int:
+    def _pick_last_sorted(self, nums: list) -> int:
         """
         Helper function to pick the last number in the longest consecutive sequence of sorted integers
-        
-        Used to select the last row in empty rows that are consecutive.
-        Used in _rule_based_grouped_policy() method to choose the last empty stack among consecutive empty stacks.
-        Helps ensure spacing when placing containers in bays that have multiple empty stacks available.
-        
+        Used to select the last row in empty rows that are consecutive
+        Used in _rule_based_grouped_policy() method to choose the last empty stack among consecutive empty stacks
+        Helps ensure spacing when placing containers in bays that have multiple empty stacks available
+
         Args:
-            nums: List of sorted integers (row indices)
-            
+            nums: List of sorted integers
+
         Returns:
-            Last integer in the longest consecutive sequence
+            Last number in the longest consecutive sequence
         """
         best_len = 1
         curr_len = 1
@@ -874,58 +979,10 @@ class LowLevelAgent(BaseAgent):
 
         return best_last
 
-    def _parse_yard_state(self, observation: dict | np.ndarray) -> np.ndarray:
+    def update_agent(self, reward: float, info: dict) -> None:
         """
-        Extract yard state from observation.
-        Handles both array and dictionary observation types.
-        
-        Args:
-            observation: Environment observation (dict or flattened array)
-            
-        Returns:
-            Yard state array in shape (total_yard_coords, num_slot_attrs)
-        """
-        if isinstance(observation, dict):
-            # Dictionary observation type - yard_state is already provided
-            return observation["yard_state"].astype(int)
-        else:
-            # Array observation type - need to parse from flattened array
-            observation = observation.astype(int)
-            vessel_end = self.total_vessel_coords * self.num_slot_attrs
-            yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
+        Update agent by storing episode experience
 
-            yard_state = observation[vessel_end:yard_end].reshape(
-                self.total_yard_coords, self.num_slot_attrs
-            )
-            return yard_state
-
-    def _parse_current_container(self, observation: dict | np.ndarray) -> np.ndarray:
-        """
-        Extract current container state from observation.
-        Handles both array and dictionary observation types.
-        
-        Args:
-            observation: Environment observation (dict or flattened array)
-            
-        Returns:
-            Current container state array in shape (num_slot_attrs,)
-        """
-        if isinstance(observation, dict):
-            # Dictionary observation type - current_container is already provided
-            return observation["current_container"].astype(int)
-        else:
-            # Array observation type - need to parse from flattened array
-            observation = observation.astype(int)
-            vessel_end = self.total_vessel_coords * self.num_slot_attrs
-            yard_end = vessel_end + (self.total_yard_coords * self.num_slot_attrs)
-
-            current_container = observation[yard_end : yard_end + self.num_slot_attrs]
-            return current_container
-
-    def update_agent(self, reward: float, info: dict | None = None) -> None:
-        """
-        Update agent based on feedback signal
-        
         Args:
             reward: Reward signal from environment
             info: Additional information dictionary
@@ -936,47 +993,57 @@ class LowLevelAgent(BaseAgent):
 class HierarchicalAgent:
     """
     Wrapper class for Hierarchical Agent combining High-Level and Low-Level agents
-    
-    The high-level agent selects a bay, and the low-level agent selects a slot
-    within that bay for container placement.
-    
+    Coordinates decision-making between bay selection (high-level) and row selection (low-level)
+
     Attributes:
         high_level_agent: HighLevelAgent instance for bay selection
-        low_level_agent: LowLevelAgent instance for slot selection
+        low_level_agent: LowLevelAgent instance for row/stack selection within selected bay
     """
 
     def __init__(
         self,
-        vessel_shape: tuple,
-        yard_shape: tuple,
+        vessel_shape: tuple[int, int, int],
+        yard_shape: tuple[int, int, int],
         num_slot_attrs: int,
         high_level_policy_type: str = "rule_based",
         low_level_policy_type: str = "rule_based",
-        verbosity: int = 0
-    ):
+    ) -> None:
+        """
+        Initialize the hierarchical agent with high-level and low-level components
+
+        Args:
+            vessel_shape: Tuple defining vessel dimensions (bays, rows, tiers)
+            yard_shape: Tuple defining yard dimensions (bays, rows, tiers)
+            num_slot_attrs: Number of attributes per slot (5: bay, row, tier, is_occupied, group)
+            high_level_policy_type: Policy type for high-level agent
+            low_level_policy_type: Policy type for low-level agent
+        """
 
         self.high_level_agent = HighLevelAgent(
-            vessel_shape, yard_shape, num_slot_attrs, high_level_policy_type, verbosity=verbosity
+            vessel_shape, yard_shape, num_slot_attrs, high_level_policy_type
         )
 
         self.low_level_agent = LowLevelAgent(
-            vessel_shape, yard_shape, num_slot_attrs, low_level_policy_type, verbosity=verbosity
+            vessel_shape, yard_shape, num_slot_attrs, low_level_policy_type
         )
 
-    def get_action(self, observation: dict | np.ndarray, valid_actions: np.ndarray) -> tuple[int | None, dict]:
+    def get_action(
+        self, observation: dict, valid_actions: list[int]
+    ) -> tuple[int, dict]:
         """
-        Get action from hierarchical agent (bay and slot)
-        
+        Get action from hierarchical agent by combining high-level and low-level decisions
+
         Args:
-            observation: Environment observation (dict or flattened array)
+            observation: Current environment observation
             valid_actions: Array of valid action indices
-            
+
         Returns:
-            Tuple of (selected_slot, action_info) where action_info contains bay and slot details
+            Tuple of (selected_slot_action, action_info_dict) where action_info_dict contains
+            selected_bay and selected_slot information
         """
 
         if len(valid_actions) == 0:
-            return None, {"error": "No valid actions available"}
+            raise RuntimeError("No valid actions available for the low level agent.")
 
         # High-Level Agent selects bay
         selected_bay = self.high_level_agent.get_action(observation, valid_actions)
@@ -996,10 +1063,10 @@ class HierarchicalAgent:
 
         return selected_slot, action_info
 
-    def update_agent(self, reward: float, info: dict | None = None) -> None:
+    def update_agent(self, reward: float, info: dict) -> None:
         """
-        Update both high-level and low-level agents with reward and info
-        
+        Update both high-level and low-level agents with reward signal
+
         Args:
             reward: Reward signal from environment
             info: Additional information dictionary
