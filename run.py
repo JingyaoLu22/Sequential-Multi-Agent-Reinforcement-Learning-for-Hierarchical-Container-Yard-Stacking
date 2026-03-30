@@ -8,11 +8,14 @@ from utils import set_config, get_device
 
 def main(args):
     
+    # Get environment config (based on args.size which is small, medium, or large)
     config = set_config(size = args.size, seed=args.seed)
     
+    # Get device (GPU or CPU)
     device = get_device()
     print(f"Using device: {device}")
 
+    # For saving model.
     # Create folder if it does not exist. If the target file already exists, overwrite it.
     if args.save_model and args.save_dir:
         os.makedirs(args.save_dir, exist_ok=True)
@@ -32,6 +35,7 @@ def main(args):
             sync_tensorboard=True,
         )
 
+    # Train the model
     train(
         config=config, device=device, render_mode=args.render_mode, parallel=args.parallel, n_parallel_envs=args.n_parallel_envs,
         eval_freq=args.eval_freq, n_eval_episodes=args.n_eval_episodes, timesteps=args.timesteps,

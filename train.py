@@ -1,40 +1,136 @@
+"""
+train.py
+
+High-level training utilities for the stowage stack environment using
+Maskable PPO. The functions used are :
+
+    create_env       - Build training and evaluation envs.
+    create_model     - Instantiate a MaskablePPO agent model (Transformer Pointer Net or Flat MLP).
+    create_callbacks - Assemble the SB3 callback chain used during `.learn()`.
+    train            - Function to train the model.
+"""
+
+from __future__ import annotations
+from typing import Any
 from sb3_contrib.ppo_mask import MaskablePPO
 from envs.stack_gym import StackEnv
 from sb3_contrib.common.wrappers import ActionMasker
-from utils import MaskedEvalCallback, mask_fn, create_parallel_envs, save_model
+from utils import MaskedEvalCallback, mask_fn, create_parallel_envs
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.callbacks import CallbackList
 from wandb.integration.sb3 import WandbCallback
 from models.transformer_policy import MaskableTransformerPolicy
 
 
-def create_env(config, seed, render_mode, parallel, n_parallel_envs):
+def create_env(
+    config: dict,
+    seed: int | None,
+    render_mode: str | None,
+    parallel: bool,
+    n_parallel_envs: int
+) -> tuple[SubprocVecEnv | StackEnv, ActionMasker]:
+    """
+    Build training and evaluation environments for the stowage stack task.
+
+    Parallel training is enabled using parallel parameters.
+
+    Reward normalisation and clipping are disabled for the evaluation env so
+    that reported scores reflect the true (un-scaled) reward signal.
+
+    Args:
+        config (dict): Environment configuration dict.
+        seed (int | None): Random seed forwarded to the environment constructors.
+        render_mode (str | None): Render mode for the non-parallel env
+        parallel (bool): If True, create a parallelized training env.
+        n_parallel_envs (int): Number of parallel worker processes when
+            parallel=True.  Ignored when parallel=False.
+
+    Returns:
+        tuple with training environment and evaluation environment.
+    """
+    # Build a separate evaluation config to turn off any reward shaping that would distort the evaluation score.
     eval_config = config.copy()
 
     eval_config['reward_norm'] = False  # Disable reward normalization for evaluation
     eval_config['reward_clip'] = False   # Disable reward clipping for evaluation
-    
+
     if parallel:
+        # Create parallel training envs
         train_env = create_parallel_envs(config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv)
+        # Evaluation always runs in a single process.
         eval_env = StackEnv(config=eval_config, render_mode=None)
-        eval_env = ActionMasker(eval_env, mask_fn)
+        # in sb3, the eval env must also be masked otherwise model chooses incorrect actions.
+        eval_env = ActionMasker(eval_env, mask_fn) 
     else:
+        # No parallel training env.
         train_env = StackEnv(config=config, render_mode=render_mode)
 
+        # Single-process evaluation env with the same render mode.
         eval_env = StackEnv(config=eval_config, render_mode=render_mode)
         eval_env = ActionMasker(eval_env, mask_fn)
+
     return train_env, eval_env
 
-def create_model(train_env, eval_env, config, device, eval_freq, n_eval_episodes, parallel, n_parallel_envs,
-                 use_transformer=False, embed_dim=128, n_heads=4, n_layers=2, vf_dim=128,
-                 tanh_clipping=10.0, n_epochs=10, lr=3e-4, vf_coef=0.5, run=None):
+def create_model(
+    train_env: SubprocVecEnv | StackEnv,
+    device: str,
+    parallel: bool,
+    n_parallel_envs: int,
+    use_transformer: bool = False,
+    embed_dim: int = 128,
+    n_heads: int = 4,
+    n_layers: int = 2,
+    vf_dim: int = 128,
+    tanh_clipping: float = 10.0,
+    n_epochs: int = 10,
+    lr: float = 3e-4,
+    vf_coef: float = 0.5,
+    run: Any = None
+) -> MaskablePPO:
+    """
+    Instantiate a MaskablePPO agent for the stowage stack environment.
 
+    Two policy architectures are supported:
+
+    Transformer (use_transformer=True): uses the Pointer Network architecture.
+    MLP (default): a standard two-hidden-layer network [256, 256, 32].
+
+    The number of rollout steps per update (n_steps) is automatically
+    updated based on the number of parallel envs to make sure number of PPO updates are
+    consistent across parallel and non-parallel training runs.
+
+    Args:
+        train_env: Training environment.
+        eval_env: Evaluation environment (unused here but kept for API symmetry).
+        config (dict): Environment configuration (currently unused inside this
+            function but available for future policy-specific settings).
+        device (str): PyTorch device string, e.g. "cpu" or "cuda".
+        parallel (bool): Whether the training env is vectorised.
+        n_parallel_envs (int): Number of parallel workers (used to scale n_steps so the total rollout size stays near 2048)
+        use_transformer (bool): Use the Transformer policy instead of MLP.
+        embed_dim (int): Embedding dimension for the Transformer encoder.
+        n_heads (int): Number of attention heads in the Transformer encoder.
+        n_layers (int): Number of Transformer encoder layers.
+        vf_dim (int): Hidden dimension of the value-function MLP head.
+        tanh_clipping (float): Clip logits to [-tanh_clipping, tanh_clipping]
+                         before computing action probabilities (Pointer Network trick).
+        n_epochs (int): Number of PPO gradient update epochs per rollout.
+        lr (float): Learning rate.
+        vf_coef (float): Value-function loss coefficient in the PPO objective.
+        run: Active Wandb run object, or None to disable TensorBoard logging.
+
+    Returns:
+        Model : MaskablePPO agent model ready for training.
+    """
+    # Scale n_steps inversely with the number of parallel envs so the total
+    # number of transitions collected per update (2048) remains constant.
     if parallel:
         n_steps = 2048 // n_parallel_envs
     else:
         n_steps = 2048
 
     if use_transformer:
+        # Attention-based policy with Pointer Network-style output.
         policy = MaskableTransformerPolicy
         policy_kwargs = dict(
             embed_dim=embed_dim,
@@ -44,6 +140,8 @@ def create_model(train_env, eval_env, config, device, eval_freq, n_eval_episodes
             tanh_clipping=tanh_clipping,
         )
     else:
+        # MLP policy. Critic and actor networks share same backbonne architecture 
+        # but have separate heads.
         policy = "MlpPolicy"
         policy_kwargs = dict(net_arch=[256, 256, 32])
 
@@ -62,14 +160,46 @@ def create_model(train_env, eval_env, config, device, eval_freq, n_eval_episodes
         clip_range=0.2,
         verbose=1,
         device=device,
-        tensorboard_log=f"runs/{run.id}" if run is not None else None,
+        tensorboard_log=f"runs/{run.id}" if run is not None else None
     )
 
     return model
 
-def create_callbacks(eval_env, eval_freq, n_eval_episodes, save_model_flag, save_dir, save_filename,
-                     max_reward_threshold=None, run=None):
+def create_callbacks(
+    eval_env: ActionMasker,
+    eval_freq: int,
+    n_eval_episodes: int,
+    save_model_flag: bool,
+    save_dir: str,
+    save_filename: str,
+    max_reward_threshold: float | None = None,
+    run: Any = None,
+) -> CallbackList:
+    """
+    Build the SB3 CallbackList used during model training for evaluation metrics 
+    and model saving.
 
+    Model is saved whenever a new best mean evaluation reward is achieved, 
+
+    The MaskedEvalCallback periodically rolls out the
+    current policy on the evaluation environment and saves the
+    best checkpoint.
+
+    Args:
+        eval_env: Action-masked evaluation environment.
+        eval_freq (int): How often (in environment steps) to run evaluation.
+        n_eval_episodes (int): Number of episodes per evaluation run.
+        save_model_flag (bool): Whether to save the best model to disk.
+        save_dir (str): Directory in which to save the best model checkpoint.
+        save_filename (str): Base filename for the checkpoint (without extension).
+        max_reward_threshold (float | None): Used during evaluation to 
+                 compute the percentage of episodes that achieve perfect episode for given yard.
+        run: Active W&B run object, or None to skip W&B logging.
+
+    Returns:
+        CallbackList: List of sb3 callbacks.
+    """
+    # Core evaluation callback: tracks best reward and saves checkpoints.
     eval_callback = MaskedEvalCallback(
         eval_env=eval_env,
         eval_freq=eval_freq,
@@ -77,40 +207,99 @@ def create_callbacks(eval_env, eval_freq, n_eval_episodes, save_model_flag, save
         save_best_model=save_model_flag,
         save_dir=save_dir,
         save_filename=save_filename,
-        max_reward_threshold=max_reward_threshold,
+        max_reward_threshold=max_reward_threshold
     )
 
     callback_list = [eval_callback]
     if run is not None:
+        # Stream scalars (reward, loss, entropy, etc) to Wandb.
         callback_list.append(WandbCallback(verbose=0))
 
     callbacks = CallbackList(callback_list)
-    
+
     return callbacks
 
-def train(config, device, render_mode, parallel, n_parallel_envs, eval_freq, n_eval_episodes,
-           timesteps, save_model_flag, save_dir, save_filename, max_reward_threshold=None,
-           use_transformer=False, embed_dim=128, n_heads=4, n_layers=2, vf_dim=128,
-           tanh_clipping=10.0, n_epochs=10, lr=3e-4, vf_coef=0.5, run=None):
-    # Create environments
+def train(
+    config: dict,
+    device: str,
+    render_mode: str | None,
+    parallel: bool,
+    n_parallel_envs: int,
+    eval_freq: int,
+    n_eval_episodes: int,
+    timesteps: int,
+    save_model_flag: bool,
+    save_dir: str,
+    save_filename: str,
+    max_reward_threshold: float | None = None,
+    use_transformer: bool = False,
+    embed_dim: int = 128,
+    n_heads: int = 4,
+    n_layers: int = 2,
+    vf_dim: int = 128,
+    tanh_clipping: float = 10.0,
+    n_epochs: int = 10,
+    lr: float = 3e-4,
+    vf_coef: float = 0.5,
+    run: Any = None,
+) -> None:
+    """
+    Training function.
+
+    Args:
+        config (dict): Environment configuration dict.
+        device (str): PyTorch device string, e.g. "cpu" or "cuda".
+        render_mode (str | None): Render mode for single-process environments.
+        parallel (bool): Enable parallel training.
+        n_parallel_envs (int): Number of parallel worker processes.
+        eval_freq (int): Evaluation frequency in environment steps.
+        n_eval_episodes (int): Number of rollout episodes per evaluation.
+        timesteps (int): Total environment interaction steps to train for.
+        save_model_flag (bool): Save the model or not.
+        save_dir (str): Directory for model checkpoints.
+        save_filename (str): Base filename for saved checkpoints.
+        max_reward_threshold (float | None): Used during evaluation to 
+                 compute the percentage of episodes that achieve perfect episode for given yard.
+        use_transformer (bool): Use Transformer Pointer Network architecture.
+        embed_dim (int): Transformer encoder embedding dimension.
+        n_heads (int): Number of attention heads in the Transformer encoder.
+        n_layers (int): Number of Transformer encoder layers.
+        vf_dim (int): Hidden dimension of the value-function head.
+        tanh_clipping (float): Logit clipping scale for the Pointer Network head.
+        n_epochs (int): PPO gradient update epochs per rollout batch.
+        lr (float): Learning rate.
+        vf_coef (float): Value-function loss coefficient in the PPO objective.
+        run: Active W&B run object, or None to skip W&B logging.
+    """
     seed = config.get("seed", None)
-    train_env, eval_env = create_env(config, seed=seed, render_mode=render_mode, parallel=parallel, n_parallel_envs=n_parallel_envs)
 
-    # Create model and evaluation callback
-    model = create_model(train_env, eval_env, config, device, eval_freq=eval_freq, n_eval_episodes=n_eval_episodes,
-                         parallel=parallel, n_parallel_envs=n_parallel_envs,
-                         use_transformer=use_transformer, embed_dim=embed_dim, n_heads=n_heads,
-                         n_layers=n_layers, vf_dim=vf_dim, tanh_clipping=tanh_clipping, n_epochs=n_epochs, lr=lr, vf_coef=vf_coef, run=run)
-    callbacks = create_callbacks(eval_env, eval_freq, n_eval_episodes, save_model_flag, save_dir, save_filename,
-                                  max_reward_threshold=max_reward_threshold, run=run)
+    # Build environments
+    train_env, eval_env = create_env(
+        config, seed=seed, render_mode=render_mode,
+        parallel=parallel, n_parallel_envs=n_parallel_envs
+    )
 
-    # TRAIN
+    # Build model
+    model = create_model(
+        train_env, config, device,
+        parallel=parallel, n_parallel_envs=n_parallel_envs,
+        use_transformer=use_transformer, embed_dim=embed_dim,
+        n_heads=n_heads, n_layers=n_layers, vf_dim=vf_dim,
+        tanh_clipping=tanh_clipping, n_epochs=n_epochs,
+        lr=lr, vf_coef=vf_coef, run=run
+    )
+
+    # Initialize callbacks
+    callbacks = create_callbacks(
+        eval_env, eval_freq, n_eval_episodes,
+        save_model_flag, save_dir, save_filename,
+        max_reward_threshold=max_reward_threshold, run=run
+    )
+
+    # Train
     model.learn(total_timesteps=timesteps, callback=callbacks)
 
-    # SAVE MODEL
-    if save_model_flag:
-        save_model(model, save_dir, save_filename)
-
+    # Close envs
     train_env.close()
     eval_env.close()
 

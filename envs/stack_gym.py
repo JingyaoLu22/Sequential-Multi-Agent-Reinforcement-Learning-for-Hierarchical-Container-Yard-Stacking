@@ -952,9 +952,9 @@ class StackEnv(gym.Env):
                     "current_container": gym.spaces.Box(
                         low=0,
                         high=max(
-                            self.num_yard_bay,  # bay upper limit
-                            self.yard_shape[1],  # row upper limit
-                            self.yard_shape[2],  # tier upper limit
+                            self.num_vessel_bay,  # bay upper limit
+                            self.vessel_shape[1],  # row upper limit
+                            self.vessel_shape[2],  # tier upper limit
                             1,  # is_occupied upper limit
                             self.group_num,  # group number upper limit
                         ),
@@ -992,6 +992,7 @@ class StackEnv(gym.Env):
         - current_group (1-hot): one-hot encoding of current container's group
         - left_row_max_group (1-hot): one-hot encoding of dominant group in left adjacent row (same bay)
         - right_row_max_group (1-hot): one-hot encoding of dominant group in right adjacent row (same bay)
+        - vessel_remaining_per_group (for each group) : count of remaining containers per group in vessel
         - is_empty: 1 if stack is completely empty, 0 otherwise
         - has_remaining_slots: 1 if stack has at least one empty slot, 0 otherwise
         - if pos_embeddings=False: positional_index: sequential index of the stack (0, 1, 2, ...)

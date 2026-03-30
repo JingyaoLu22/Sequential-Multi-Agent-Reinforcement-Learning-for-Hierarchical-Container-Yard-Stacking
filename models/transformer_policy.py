@@ -1,5 +1,19 @@
 """
-Transformer encoder + AM-style pointer-network decoder for MaskablePPO on StackEnv.
+Transformer encoder and Pointer Network decoder model.
+The policy architecture is designed for the "stack_features" observation layout without positional embeddings.
+
+Let N be number of stacks in the yard (== num_actions) and F be the number of features per stack.
+include_container_in_encoder controls whether the current-container (one-hot) is included in the encoder input or only used as side context for the decoder and critic.
+B is the batch dimension. D is the embed_dim (hidden dim) for the transformer.
+so the input observation is a flat vector of shape (N*F,). sb3 requires it to be flattened,
+so reshaping it into (B, N, F) is the first step in the features extractor.  
+
+Then a forward pass through the transformer encoder produces 
+graph embeddings (GE) of shape (B, N, embed_dim).
+
+The graph embeddings (GE) and the current_container features are used 
+in the PointerDecoder to produce the stack action logits (B, N)
+and in the critic head to produce value estimates (B, vf_dim).
 
 Observation layout (observation_type="stack_features", pos_embeddings=False):
     flat shape (N*F,)  where
@@ -9,26 +23,25 @@ Observation layout (observation_type="stack_features", pos_embeddings=False):
 Forward pass
 ------------
 obs (B, N*F)
-  └─ TransformerFeaturesExtractor (shared encoder)
+  └─ TransformerFeaturesExtractor (Encoder)
        reshape → (B,N,F)
-       extract container one-hot → (B, G)  [identical across all stacks]
        if include_container_in_encoder:
            keep full (B, N, F) for the encoder
        else:
            strip current_group_onehot → (B, N, F-G)
        input_proj → TransformerEncoder → GE (B, N, embed_dim)
-       ══► cat(GE.flatten, container_feats) → (B, N*embed_dim + G)  [features_dim]
-  └─ TransformerActorCritic (mlp_extractor)
+  └─ TransformerActorCritic (Pointer Decoder + Critic)
        actor  : PointerDecoder(GE, container_feats) → (B, N)  pointer logits
        critic : mean-pool(GE) + project(container_feats) → critic MLP → (B, vf_dim)
-  └─ MaskableTransformerPolicy
+  └─ MaskableTransformerPolicy (Actor and Critic heads)
        action_net = nn.Identity()   ← pointer logits pass through unchanged
        value_net  = nn.Linear(vf_dim, 1)
-  └─ MaskablePPO
-       logits[action_mask == 0] = -inf  (applied automatically by sb3_contrib)
+  └─ MaskablePPO (apply action masks)
+       logits[action_mask == 0] = -inf  
 
 PointerDecoder (AM-style, Kool et al. 2019)
 -------------------------------------------
+Summary of Pointer Decoder :
 GE (B, N, D)
   project_node → K, V, L   each (B, N, D)    [3-chunk split of Linear(D→3D)]
   project_global(GE.mean) → G  (B, D)         [global graph context]
@@ -51,10 +64,6 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
 
-# ---------------------------------------------------------------------------
-# 1. Features Extractor  (shared encoder)
-# ---------------------------------------------------------------------------
-
 class TransformerFeaturesExtractor(BaseFeaturesExtractor):
     """
     Reshapes the flat (N*F,) observation into (B,N,F), optionally strips the
@@ -68,7 +77,7 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
     The current-container one-hot lives at positions [group_num+2 : 2*group_num+2]
     within each stack's feature slice — identical across all N stacks — so it is
     always read from stack index 0 for the decoder/critic.  When
-    include_container_in_encoder is True the one-hot is *kept* in the encoder
+    include_container_in_encoder is True the one-hot is kept in the encoder
     input so that self-attention can attend to the current container identity.
 
     Parameters
@@ -103,10 +112,10 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         )
         f_per_stack = obs_dim // n_stacks
 
-        # Auto-infer group_num from stack_features layout: f_per_stack = 5*group_num + 5
+        # Extracting group_num from stack_features layout: f_per_stack = 5*group_num + 5
         if (f_per_stack - 5) % 5 != 0:
             raise ValueError(
-                f"Cannot auto-infer group_num: f_per_stack={f_per_stack} does not satisfy "
+                f"f_per_stack={f_per_stack} does not satisfy "
                 f"(f_per_stack - 5) % 5 == 0.  This policy requires "
                 f"observation_type='stack_features' with pos_embeddings=False."
             )
@@ -117,7 +126,6 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         self.group_num = group_num
         self.include_container_in_encoder = include_container_in_encoder
         # Slice offsets for the current-container one-hot within each stack feature vector:
-        # layout: [count_per_group(G)] [num_occupied(1)] [num_empty(1)] [current_group_onehot(G)] ...
         self._cont_start = group_num + 2
         self._cont_end = 2 * group_num + 2
 
@@ -141,7 +149,7 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         # observations: (B, N*F)
         b = observations.shape[0]
         x = observations.view(b, self.n_stacks, -1)            # (B, N, F)
-        # Current-container one-hot is identical across all stacks; read from stack 0
+        # Extract current_container features
         container_feats = x[:, 0, self._cont_start:self._cont_end].clone()  # (B, G)
         if not self.include_container_in_encoder:
             # Strip the one-hot so the encoder only sees yard-state features
@@ -150,37 +158,36 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         x = self.input_proj(x)                                  # (B, N, embed_dim)
         x = self.encoder(x)                                     # (B, N, embed_dim)
         enc_flat = x.flatten(start_dim=1)                       # (B, N*embed_dim)
+
+        # container_feats is appended to the output from encoder (without any learnable parameters)
+        # so that it can be used by decoder
         return torch.cat([enc_flat, container_feats], dim=-1)   # (B, N*embed_dim + G)
 
 
-# ---------------------------------------------------------------------------
-# 2. Pointer Decoder  (AM-style, non-autoregressive)
-# ---------------------------------------------------------------------------
 
 class PointerDecoder(nn.Module):
     """
     Attention-Model pointer decoder (Kool et al. 2019), adapted for the stack
-    placement problem.  Runs at *every* timestep (non-autoregressive).
+    placement problem.  Runs at every timestep so it is not autoregressive.
 
     Given graph embeddings GE (B, N, D) from the encoder and the current-
     container one-hot (B, G), it computes:
 
-        K, V, L = chunk( Linear(D→3D)(GE) )           each (B, N, D)
+        K, V, L = chunk( Linear(D→3D)(GE) )           3 x (B, N, D)
         G       = Linear(D→D)( GE.mean(dim=1) )        (B, D)
         C_k     = Linear(G→D)( container_feats )        (B, D)
         Q       = (G + C_k).unsqueeze(1)                (B, 1, D)
         H, _    = MultiheadAttention(Q, K, V)           (B, 1, D)
         G_k     = Linear(D→D)(H)                        (B, 1, D)
-        logits  = bmm(G_k, L.T) / sqrt(D) → squeeze    (B, N)
-        logits  = tanh_clipping * tanh(logits)
+        logits  = (G_k . L.T) / sqrt(D)                 (B, N)
 
     Parameters
     ----------
     embed_dim      : int
-    n_stacks       : int   — N
+    n_stacks       : int   — N, number of stacks (== num_actions)
     group_num      : int   — G, size of container one-hot
     n_heads        : int   — heads for the glimpse cross-attention
-    tanh_clipping  : float — clip logits to [-C, C]; 0 disables clipping
+    tanh_clipping  : float — clip logits to [-C, C]
     """
 
     def __init__(
@@ -225,10 +232,10 @@ class PointerDecoder(nn.Module):
         # Split node embeddings into keys, values and logit keys
         K, V, L = self.project_node(GE).chunk(3, dim=-1)   # each (B, N, D)
 
-        # Global context vector
+        # Global context vector mean pooling
         G_ctx = self.project_global(GE.mean(dim=1))         # (B, D)
 
-        # Step context from current container
+        # Current Step context from current container
         C_k = self.project_step(container_feats)             # (B, D)
 
         # Query = global context + step context
@@ -242,31 +249,28 @@ class PointerDecoder(nn.Module):
         logits = torch.bmm(G_k, L.transpose(1, 2)) / self._scale  # (B, 1, N)
         logits = logits.squeeze(1)                           # (B, N)
 
+        # Tanh clipping helps stability by preventing large logit values
         if self.tanh_clipping > 0:
             logits = self.tanh_clipping * torch.tanh(logits)
 
         return logits
 
 
-# ---------------------------------------------------------------------------
-# 3. Actor-Critic network  (mlp_extractor)
-# ---------------------------------------------------------------------------
-
 class TransformerActorCritic(nn.Module):
     """
     Receives the shared encoder output (B, N*embed_dim + G) and produces:
       - latent_pi : (B, N)       — pointer logits from PointerDecoder
-      - latent_vf : (B, vf_dim)  — value estimate features
+      - latent_vf : (B, vf_dim)  — value estimates
 
     Parameters
     ----------
-    feature_dim    : int   — N*embed_dim + group_num  (features_dim from extractor)
-    n_stacks       : int   — N
-    embed_dim      : int
-    group_num      : int   — G, container one-hot size (auto-derived)
-    n_heads        : int   — attention heads for PointerDecoder
-    vf_dim         : int   — hidden size of the critic MLP head
-    tanh_clipping  : float — passed to PointerDecoder
+    feature_dim    - N*embed_dim + group_num  (features_dim from extractor)
+    n_stacks       - N
+    embed_dim      - D, transformer embedding dimension
+    group_num      - G, container one-hot size (auto-derived)
+    n_heads        - attention heads for PointerDecoder
+    vf_dim         - hidden size of the critic MLP head
+    tanh_clipping  - passed to PointerDecoder
     """
 
     def __init__(
@@ -290,11 +294,11 @@ class TransformerActorCritic(nn.Module):
         self.embed_dim = embed_dim
         self._enc_size = n_stacks * embed_dim  # split boundary in the feature vector
 
-        # Exposed to SB3 ActorCriticPolicy for building action_net / value_net
+        # Used by SB3 ActorCriticPolicy for building action_net / value_net
         self.latent_dim_pi = n_stacks
         self.latent_dim_vf = vf_dim
 
-        # Actor: AM-style pointer decoder
+        # Pointer decoder for actor
         self.decoder = PointerDecoder(
             embed_dim=embed_dim,
             n_stacks=n_stacks,
@@ -303,7 +307,7 @@ class TransformerActorCritic(nn.Module):
             tanh_clipping=tanh_clipping,
         )
 
-        # Critic: mean-pool encoder output + container projection → MLP
+        # Critic: mean-pool encoder output + container projection -> MLP
         self.critic_step_proj = nn.Linear(group_num, embed_dim, bias=False)
         self.critic_head = nn.Sequential(
             nn.Linear(embed_dim, vf_dim),
@@ -333,19 +337,10 @@ class TransformerActorCritic(nn.Module):
         return self.critic_head(pooled + C_k)                 # (B, vf_dim)
 
 
-# ---------------------------------------------------------------------------
-# 4. Policy
-# ---------------------------------------------------------------------------
-
 class MaskableTransformerPolicy(MaskableActorCriticPolicy):
     """
-    Drop-in replacement for MlpPolicy in MaskablePPO when using stack_features
-    observations.  Pass to MaskablePPO as the policy class and supply
-    transformer hyper-parameters via policy_kwargs.
-
-    Required
-    --------
-    observation_type = 'stack_features', pos_embeddings = False  (env config)
+    Drop-in replacement for MlpPolicy in MaskablePPO.
+    Required for compatibility with SB3's MaskablePPO.
 
     Optional policy_kwargs
     ----------------------
@@ -356,8 +351,8 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
     dropout                    : float (default 0.1)
     vf_dim                     : int   (default 128)
     tanh_clipping              : float (default 10.0) — 0 disables clipping
-    include_container_in_encoder : bool (default True) — include current-container
-        one-hot in encoder input; False strips it (original behaviour)
+    include_container_in_encoder : bool (default True) — include current-container to encoder input
+                            or strip it out and only use as side context for decoder and critic
     """
 
     def __init__(
@@ -375,7 +370,7 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
         include_container_in_encoder: bool = True,
         **kwargs,
     ) -> None:
-        # Infer n_stacks from action_space when not provided explicitly
+        # Extract num of stacks if not explicitily provided
         if n_stacks is None:
             n_stacks = action_space.n
 
@@ -386,6 +381,7 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
         self._transformer_tanh_clipping = tanh_clipping
 
         # Inject the custom features extractor so SB3 builds it automatically
+        # For sb3 compatibility
         kwargs["features_extractor_class"] = TransformerFeaturesExtractor
         kwargs["features_extractor_kwargs"] = dict(
             n_stacks=n_stacks,
@@ -396,7 +392,7 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
             include_container_in_encoder=include_container_in_encoder,
         )
 
-        # Disable orthogonal init (not suited for transformers)
+        # Disable orthogonal init (performs poorly for transformers)
         kwargs["ortho_init"] = False
 
         super().__init__(
@@ -421,7 +417,6 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
 
     def _build(self, lr_schedule: Callable[[float], float]) -> None:
         super()._build(lr_schedule)
-        # Replace the standard Linear(latent_dim_pi, action_space.n) with Identity.
-        # The pointer head already outputs (B, N) logits; passing them through a
-        # Linear(N, N) would corrupt them and double-count the learned weights.
+        # Replace the standard Linear(latent_dim_pi, action_space.n) with Identity 
+        # for sb3 compatibility
         self.action_net = nn.Identity()
