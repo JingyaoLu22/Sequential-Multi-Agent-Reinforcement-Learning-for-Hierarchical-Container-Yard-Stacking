@@ -809,9 +809,9 @@ class StackEnv(gym.Env):
                     "current_container": gym.spaces.Box(
                         low=0,
                         high=max(
-                            self.num_yard_bay,  # bay upper limit
-                            self.yard_shape[1],  # row upper limit
-                            self.yard_shape[2],  # tier upper limit
+                            self.num_vessel_bay,  # bay upper limit
+                            self.vessel_shape[1],  # row upper limit
+                            self.vessel_shape[2],  # tier upper limit
                             1,  # is_occupied upper limit
                             self.group_num,  # group number upper limit
                         ),
