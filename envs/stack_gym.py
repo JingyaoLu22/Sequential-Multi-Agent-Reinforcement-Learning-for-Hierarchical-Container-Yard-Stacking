@@ -20,7 +20,7 @@ class StackEnv(gym.Env):
 
     Containers start fully loaded on the vessel. Environment selects containers sequentially and randomly
     from the vessel (top containers in each stack) at each time step and the agent is tasked with selecting a slot for
-    the container in the yard. The goal is to place similar-group containers close together.
+    the container in the yard. The goal is to place similar group containers close together.
     """
 
     metadata = {
