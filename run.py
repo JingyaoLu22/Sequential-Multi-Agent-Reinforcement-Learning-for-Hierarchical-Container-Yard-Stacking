@@ -59,7 +59,20 @@ def main(args):
         n_epochs=args.n_epochs,
         lr=args.lr,
         vf_coef=args.vf_coef,
+        ent_coef=args.ent_coef,
+        batch_size=args.batch_size,
+        n_steps_total=args.n_steps,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        lr_decay=args.lr_decay,
         run=run,
+        hierarchical=args.hierarchical,
+        high_level_policy_type=args.high_level_policy,
+        hierarchical_high_level=args.hierarchical_high_level,
+        low_level_agent_type=args.low_level_agent,
+        low_level_model_path=args.low_level_model_path,
+        joint_hierarchical=args.joint_hierarchical,
+        hierarchical_diffobs=args.hierarchical_diffobs,
     )
 
     if run is not None:
@@ -74,7 +87,7 @@ if __name__ == "__main__":
         "--size",
         type=str,
         default="small",
-        choices=["small", "medium", "large"],
+        choices=["small", "medium", "large","large_v2","large_v3","large_v4"],
         help="Size of the environment configuration.",
     )
     parser.add_argument(
@@ -200,6 +213,84 @@ if __name__ == "__main__":
         type=float,
         default=0.5,
         help="Value function coefficient for the loss.",
+    )
+    parser.add_argument(
+        "--ent_coef",
+        type=float,
+        default=None,
+        help="Entropy coefficient for the loss. Defaults to 0.15 for joint_hierarchical, 0.3 otherwise.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Minibatch size for PPO gradient updates.",
+    )
+    parser.add_argument(
+        "--n_steps",
+        type=int,
+        default=2048,
+        help="Total number of rollout transitions per update (divided across parallel envs).",
+    )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=0.99,
+        help="Discount factor for future rewards.",
+    )
+    parser.add_argument(
+        "--gae_lambda",
+        type=float,
+        default=0.95,
+        help="GAE lambda for advantage estimation.",
+    )
+    parser.add_argument(
+        "--lr_decay",
+        action="store_true",
+        help="Use linear learning rate decay to 0 over training.",
+    )
+    # hierarchical args
+    parser.add_argument(
+        "--hierarchical",
+        action="store_true",
+        help="Use hierarchical mode: fixed high-level agent selects bay, RL learns low-level stack selection.",
+    )
+    parser.add_argument(
+        "--high_level_policy",
+        type=str,
+        default="rule_based_grouped",
+        choices=["rule_based_grouped", "rule_based", "random"],
+        help="Policy for the high-level bay-selection agent (only used with --hierarchical).",
+    )
+    # hierarchical high-level training args
+    parser.add_argument(
+        "--hierarchical_high_level",
+        action="store_true",
+        help="Train the high-level bay-selection agent with a fixed low-level agent.",
+    )
+    parser.add_argument(
+        "--low_level_agent",
+        type=str,
+        default="rule_based_grouped",
+        choices=["rule_based_grouped", "rule_based", "random", "trained_model"],
+        help="Policy for the fixed low-level agent (only used with --hierarchical_high_level).",
+    )
+    parser.add_argument(
+        "--low_level_model_path",
+        type=str,
+        default=None,
+        help="Path to saved MaskablePPO low-level model (required when --low_level_agent trained_model).",
+    )
+    # joint hierarchical args
+    parser.add_argument(
+        "--joint_hierarchical",
+        action="store_true",
+        help="Train bay and stack selection jointly with an autoregressive policy.",
+    )
+    parser.add_argument(
+        "--hierarchical_diffobs",
+        action="store_true",
+        help="Train with differentiated observations: bay head sees bay-level features, stack head sees per-bay stack features.",
     )
     args = parser.parse_args()
 

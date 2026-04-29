@@ -98,6 +98,8 @@ class StackEnv(gym.Env):
         self.reward_norm = config.get("reward_norm", False)
         self.reward_clip = config.get("reward_clip", False)
         self.pos_embeddings = config.get("pos_embeddings", False)
+        self.stack_fill_penalty = config.get("stack_fill_penalty", False)
+        self._same_group_stack_available: bool = False
 
         if self.seed is None:
             # Use instance-level RandomState for thread-safe parallel execution
@@ -314,6 +316,9 @@ class StackEnv(gym.Env):
         # info["yard_mask"] = valid_actions_list
         # terminated = False
         # return observation, reward, terminated, truncated, info
+
+        # Cache whether a same-group stack with space exists (used in reward rule_0)
+        self._cache_pre_placement_stack_fill(yard_slot)
 
         # Calculate reward
         reward = self._calculate_reward(yard_slot)
@@ -640,15 +645,19 @@ class StackEnv(gym.Env):
         rule_2_multiplier = 10.0
         rule_3_multiplier = 2.0
         """
-        rule_0_multiplier = 0.2
+        rule_0_multiplier = 2.0
         rule_1_multiplier = 2.0
 
         rule_2_multiplier = 1.0
         rule_3_multiplier = 0.2
 
-        # Rule 0: Penalty for occupying new ground slot in unoccupied stack
+        # Rule 0: Penalty for occupying new ground slot in unoccupied stack.
+        # If stack_fill_penalty is True, only penalise when another same-group stack
+        # with available space exists (agent skipped a better stacking opportunity).
+        # If stack_fill_penalty is False, always penalise (original behaviour).
         if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
-            reward -= rule_0_multiplier
+            if not self.stack_fill_penalty or self._same_group_stack_available:
+                reward -= rule_0_multiplier
 
         # Rule 1: Reward/penalty for placing container in a stack having same/dissimilar containers in the same stack.
         bay_row_mask = (self.yard_state[:, StateIds.BAY.value] == placement_bay) & (
@@ -743,6 +752,51 @@ class StackEnv(gym.Env):
         if self.reward_clip:
             reward = np.clip(reward, -5.0, 5.0)
         return reward
+
+    def _cache_pre_placement_stack_fill(self, yard_slot: int) -> None:
+        """Pre-compute whether any other stack in the target bay has the same-group
+        container at its top AND has space remaining.
+
+        Only computed when stack_fill_penalty is True.
+        The cached boolean is consumed by rule_0 in _calculate_default_reward.
+        """
+        if not self.stack_fill_penalty:
+            self._same_group_stack_available = False
+            return
+
+        placement_bay = self.yard_state[yard_slot, StateIds.BAY.value]
+        placement_row = self.yard_state[yard_slot, StateIds.ROW.value]
+        container_group = self.vessel_state[
+            self.current_vessel_container, StateIds.GROUP.value
+        ]
+        max_tiers = self.yard_shape[2]
+
+        # Iterate over all rows in this bay except the target row
+        all_rows_in_bay = np.unique(
+            self.yard_state[
+                self.yard_state[:, StateIds.BAY.value] == placement_bay,
+                StateIds.ROW.value,
+            ]
+        )
+        for row in all_rows_in_bay:
+            if row == placement_row:
+                continue
+            stack_mask = (
+                (self.yard_state[:, StateIds.BAY.value] == placement_bay)
+                & (self.yard_state[:, StateIds.ROW.value] == row)
+                & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+            )
+            occupied_indices = np.where(stack_mask)[0]
+            if len(occupied_indices) == 0 or len(occupied_indices) >= max_tiers:
+                continue
+            # Find the top container (highest tier value)
+            tiers = self.yard_state[occupied_indices, StateIds.TIER.value]
+            top_idx = occupied_indices[np.argmax(tiers)]
+            if self.yard_state[top_idx, StateIds.GROUP.value] == container_group:
+                self._same_group_stack_available = True
+                return
+
+        self._same_group_stack_available = False
 
     def _get_majority_group(self, bay: int, row: int) -> Optional[int]:
         """
@@ -991,6 +1045,51 @@ class StackEnv(gym.Env):
                     num_stacks,  # stack_index upper limit
                 ),
                 shape=(num_stacks * features_per_stack,),
+                dtype=np.float32,
+            )
+        elif self.observation_type == "stack_features_v3":
+            # Scalar stack features: 5 features per stack (no one-hot encoding)
+            # [majority_group, num_occupied, current_container_group,
+            #  adj_majority_group, stack_index]
+            features_per_stack = 5
+            num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
+
+            return gym.spaces.Box(
+                low=-1,  # sentinel for empty/no-group
+                high=max(
+                    self.group_num,  # group index upper limit
+                    self.yard_shape[2],  # num_occupied upper limit
+                    num_stacks,  # stack_index upper limit
+                ),
+                shape=(num_stacks * features_per_stack,),
+                dtype=np.float32,
+            )
+        elif self.observation_type == "hierarchical_diff_obs":
+            # Hierarchical differentiated observation: bay features + stack features
+            # Bay features per bay: bay_index, group_counts(group_num), num_empty_stacks,
+            #                       num_not_full_matching, num_matching_stacks
+            # => bay_f_dim = group_num + 4
+            # Stack features per stack: same as stack_features but with relative positional index
+            # => stack_f_dim = 5 * group_num + 5
+            n_bays = self.yard_shape[0]
+            n_rows = self.yard_shape[1]
+            num_stacks = n_bays * n_rows
+            bay_f_dim = self.group_num + 4
+            stack_f_dim = 5 * self.group_num + 5
+            total_dim = n_bays * bay_f_dim + num_stacks * stack_f_dim
+
+            return gym.spaces.Box(
+                low=0,
+                high=max(
+                    n_bays,  # bay_index upper limit
+                    self.yard_shape[2] * n_rows,  # max containers per group in a bay
+                    n_rows,  # num_empty_stacks upper limit
+                    self.yard_shape[2],  # max count per group in a stack
+                    self.num_containers,  # vessel_remaining_per_group upper limit
+                    num_stacks,  # positional index upper limit
+                    1,  # binary features upper limit
+                ),
+                shape=(total_dim,),
                 dtype=np.float32,
             )
         else:
@@ -1253,6 +1352,307 @@ class StackEnv(gym.Env):
 
         return stack_features.flatten()
 
+    def _create_stack_features_v3(self) -> np.ndarray:
+        """
+        Transform yard_state into scalar stack-based features (no one-hot encoding).
+
+        For each stack (bay, row combination), computes 5 scalar features:
+        - [0] majority_group: group index with most containers in this stack (-1 if empty)
+        - [1] num_occupied: number of occupied slots in the stack
+        - [2] current_container_group: group index of the container being placed (-1 if none)
+        - [3] adj_majority_group: majority group in left+right adjacent stacks combined (-1 if none)
+        - [4] stack_index: sequential positional index (0, 1, 2, ...)
+
+        Returns:
+            np.ndarray: Flattened feature vector for all stacks (shape: num_stacks * 5)
+        """
+        yard_bays = np.unique(self.yard_state[:, StateIds.BAY.value])
+        yard_bays = yard_bays[yard_bays % 2 == 1]  # only odd bays
+        yard_rows = np.arange(1, self.yard_shape[1] + 1)
+
+        num_stacks = len(yard_bays) * len(yard_rows)
+        features_per_stack = 5
+        stack_features = np.full(
+            (num_stacks, features_per_stack), -1.0, dtype=np.float32
+        )
+
+        # Current container group (same for all stacks)
+        current_container_group = -1.0
+        if self.current_vessel_container is not None:
+            current_container_group = float(
+                self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+            )
+
+        stack_idx = 0
+        for bay in yard_bays:
+            for row in yard_rows:
+                # Find all slots in this stack
+                stack_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & (
+                    self.yard_state[:, StateIds.ROW.value] == row
+                )
+                stack_slots = self.yard_state[stack_mask]
+
+                # [0] majority_group — scalar (-1 if empty)
+                occupied_mask = stack_slots[:, StateIds.IS_OCCUPIED.value] == 1
+                if np.any(occupied_mask):
+                    occupied_groups = stack_slots[occupied_mask, StateIds.GROUP.value]
+                    stack_features[stack_idx, 0] = float(
+                        np.bincount(occupied_groups.astype(int)).argmax()
+                    )
+                # else: stays -1
+
+                # [1] num_occupied
+                stack_features[stack_idx, 1] = float(np.sum(occupied_mask))
+
+                # [2] current_container_group — scalar (-1 if none)
+                stack_features[stack_idx, 2] = current_container_group
+
+                # [3] adj_majority_group — majority of combined left+right adjacent stacks
+                adjacent_groups = []
+                left_row = row - 1
+                if left_row >= 1:
+                    left_mask = (
+                        (self.yard_state[:, StateIds.BAY.value] == bay)
+                        & (self.yard_state[:, StateIds.ROW.value] == left_row)
+                        & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                    )
+                    left_groups = self.yard_state[left_mask, StateIds.GROUP.value]
+                    if len(left_groups) > 0:
+                        adjacent_groups.extend(left_groups)
+
+                right_row = row + 1
+                if right_row <= self.yard_shape[1]:
+                    right_mask = (
+                        (self.yard_state[:, StateIds.BAY.value] == bay)
+                        & (self.yard_state[:, StateIds.ROW.value] == right_row)
+                        & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                    )
+                    right_groups = self.yard_state[right_mask, StateIds.GROUP.value]
+                    if len(right_groups) > 0:
+                        adjacent_groups.extend(right_groups)
+
+                if len(adjacent_groups) > 0:
+                    stack_features[stack_idx, 3] = float(
+                        np.bincount(np.array(adjacent_groups).astype(int)).argmax()
+                    )
+                # else: stays -1
+
+                # [4] stack_index
+                stack_features[stack_idx, 4] = float(stack_idx)
+
+                stack_idx += 1
+
+        return stack_features.flatten()
+
+    def _create_bay_features(self) -> np.ndarray:
+        """
+        Create bay-level summary features for the hierarchical differentiated observation.
+
+        For each bay computes:
+        - bay_index: 1-indexed sequential bay number (1, 2, 3, ...)
+        - count_group_0, ..., count_group_{n-1}: number of containers per group in the bay
+        - num_completely_empty_stacks: stacks with 0 containers in the bay
+        - num_not_full_matching: not-full stacks whose majority group == current container's group
+        - num_matching_stacks: all non-empty stacks (full or not) whose majority group == current container's group
+
+        Returns:
+            np.ndarray: shape (n_bays, bay_f_dim) where bay_f_dim = group_num + 4
+        """
+        yard_bays = np.unique(self.yard_state[:, StateIds.BAY.value])
+        yard_bays = yard_bays[yard_bays % 2 == 1]  # only odd bays
+        yard_rows = np.arange(1, self.yard_shape[1] + 1)
+        n_bays = len(yard_bays)
+        bay_f_dim = self.group_num + 4
+
+        bay_features = np.zeros((n_bays, bay_f_dim), dtype=np.float32)
+
+        # Get current container group
+        current_group = -1
+        if self.current_vessel_container is not None:
+            current_group = int(
+                self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+            )
+
+        for bay_idx, bay in enumerate(yard_bays):
+            feature_idx = 0
+
+            # bay_index (1-indexed sequential)
+            bay_features[bay_idx, feature_idx] = bay_idx + 1
+            feature_idx += 1
+
+            # Get all slots in this bay
+            bay_mask = self.yard_state[:, StateIds.BAY.value] == bay
+            bay_slots = self.yard_state[bay_mask]
+            occupied_mask = bay_slots[:, StateIds.IS_OCCUPIED.value] == 1
+
+            # count_group_0 ... count_group_{n-1}
+            for group in range(self.group_num):
+                group_count = np.sum(
+                    occupied_mask & (bay_slots[:, StateIds.GROUP.value] == group)
+                )
+                bay_features[bay_idx, feature_idx] = group_count
+                feature_idx += 1
+
+            # Per-stack stats within this bay
+            num_empty_stacks = 0
+            num_not_full_matching = 0
+            num_matching_stacks = 0
+
+            for row in yard_rows:
+                stack_mask = (
+                    (self.yard_state[:, StateIds.BAY.value] == bay)
+                    & (self.yard_state[:, StateIds.ROW.value] == row)
+                )
+                stack_slots = self.yard_state[stack_mask]
+                num_occupied = np.sum(stack_slots[:, StateIds.IS_OCCUPIED.value])
+                num_total = len(stack_slots)
+                is_full = num_occupied == num_total
+
+                if num_occupied == 0:
+                    num_empty_stacks += 1
+                else:
+                    # Stack is non-empty, compute majority group
+                    majority_group = self._get_majority_group(bay, row)
+                    if majority_group is not None and current_group >= 0:
+                        if majority_group == current_group:
+                            # non-empty stack with matching majority
+                            num_matching_stacks += 1
+                            if not is_full:
+                                num_not_full_matching += 1
+
+            bay_features[bay_idx, feature_idx] = num_empty_stacks
+            feature_idx += 1
+            bay_features[bay_idx, feature_idx] = num_not_full_matching
+            feature_idx += 1
+            bay_features[bay_idx, feature_idx] = num_matching_stacks
+
+        return bay_features
+
+    def _create_stack_features_relative(self) -> np.ndarray:
+        """
+        Same as _create_stack_features() but with relative positional index per bay
+        (0, 1, ..., n_rows-1) instead of global stack index.
+        Stacks are ordered bay-major: all rows of bay 0, then all rows of bay 1, etc.
+
+        Returns:
+            np.ndarray: shape (n_stacks, stack_f_dim) where stack_f_dim = 5 * group_num + 5
+        """
+        yard_bays = np.unique(self.yard_state[:, StateIds.BAY.value])
+        yard_bays = yard_bays[yard_bays % 2 == 1]
+        yard_rows = np.arange(1, self.yard_shape[1] + 1)
+
+        num_stacks = len(yard_bays) * len(yard_rows)
+        features_per_stack = 5 * self.group_num + 5
+        stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
+
+        current_group = -1
+        if self.current_vessel_container is not None:
+            current_group = int(
+                self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+            )
+
+        vessel_group_counts = np.zeros(self.group_num, dtype=np.float32)
+        vessel_occupied_mask = self.vessel_state[:, StateIds.IS_OCCUPIED.value] == 1
+        vessel_occupied_slots = self.vessel_state[vessel_occupied_mask]
+        for group in range(self.group_num):
+            vessel_group_counts[group] = np.sum(
+                vessel_occupied_slots[:, StateIds.GROUP.value] == group
+            )
+
+        stack_idx = 0
+        for bay in yard_bays:
+            relative_idx = 0
+            for row in yard_rows:
+                stack_mask = (self.yard_state[:, StateIds.BAY.value] == bay) & (
+                    self.yard_state[:, StateIds.ROW.value] == row
+                )
+                stack_slots = self.yard_state[stack_mask]
+
+                feature_idx = 0
+
+                for group in range(self.group_num):
+                    group_mask = (stack_slots[:, StateIds.IS_OCCUPIED.value] == 1) & (
+                        stack_slots[:, StateIds.GROUP.value] == group
+                    )
+                    stack_features[stack_idx, feature_idx] = np.sum(group_mask)
+                    feature_idx += 1
+
+                num_occupied = np.sum(stack_slots[:, StateIds.IS_OCCUPIED.value])
+                stack_features[stack_idx, feature_idx] = num_occupied
+                feature_idx += 1
+
+                num_empty = len(stack_slots) - num_occupied
+                stack_features[stack_idx, feature_idx] = num_empty
+                feature_idx += 1
+
+                if current_group >= 0:
+                    stack_features[stack_idx, feature_idx + current_group] = 1.0
+                feature_idx += self.group_num
+
+                # left_row_max_group
+                left_row = row - 1
+                if left_row >= 1:
+                    left_mask = (
+                        (self.yard_state[:, StateIds.BAY.value] == bay)
+                        & (self.yard_state[:, StateIds.ROW.value] == left_row)
+                        & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                    )
+                    left_groups = self.yard_state[left_mask, StateIds.GROUP.value]
+                    if len(left_groups) > 0:
+                        left_max_group = np.bincount(left_groups.astype(int)).argmax()
+                        stack_features[stack_idx, feature_idx + left_max_group] = 1.0
+                feature_idx += self.group_num
+
+                # right_row_max_group
+                right_row = row + 1
+                if right_row <= self.yard_shape[1]:
+                    right_mask = (
+                        (self.yard_state[:, StateIds.BAY.value] == bay)
+                        & (self.yard_state[:, StateIds.ROW.value] == right_row)
+                        & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                    )
+                    right_groups = self.yard_state[right_mask, StateIds.GROUP.value]
+                    if len(right_groups) > 0:
+                        right_max_group = np.bincount(right_groups.astype(int)).argmax()
+                        stack_features[stack_idx, feature_idx + right_max_group] = 1.0
+                feature_idx += self.group_num
+
+                stack_features[
+                    stack_idx, feature_idx : feature_idx + self.group_num
+                ] = vessel_group_counts
+                feature_idx += self.group_num
+
+                stack_features[stack_idx, feature_idx] = (
+                    1.0 if num_occupied == 0 else 0.0
+                )
+                feature_idx += 1
+
+                stack_features[stack_idx, feature_idx] = 1.0 if num_empty > 0 else 0.0
+                feature_idx += 1
+
+                # Relative positional index within bay (0, 1, ..., n_rows-1)
+                stack_features[stack_idx, feature_idx] = relative_idx
+
+                stack_idx += 1
+                relative_idx += 1
+
+        return stack_features
+
+    def _create_hierarchical_diff_obs(self) -> np.ndarray:
+        """
+        Create the hierarchical differentiated observation.
+
+        Layout: [bay_features.flatten() | stack_features.flatten()]
+        - bay_features: (n_bays, bay_f_dim) flattened
+        - stack_features: (n_stacks, stack_f_dim) flattened, with relative positional indices
+
+        Returns:
+            np.ndarray: flat observation vector
+        """
+        bay_features = self._create_bay_features()    # (n_bays, bay_f_dim)
+        stack_features = self._create_stack_features_relative()  # (n_stacks, stack_f_dim)
+        return np.concatenate([bay_features.flatten(), stack_features.flatten()])
+
     def _create_observation(self) -> Union[np.ndarray, Dict]:
         """
         Create observation based on observation_type
@@ -1335,6 +1735,24 @@ class StackEnv(gym.Env):
                 return stack_features
             else:
                 return {"observation": stack_features, "mask": mask}
+
+        elif self.observation_type == "stack_features_v3":
+            # Scalar stack features (5 features per stack, no one-hot)
+            stack_features = self._create_stack_features_v3()
+
+            if self.action_mask_with_obs == "default":
+                return stack_features
+            else:
+                return {"observation": stack_features, "mask": mask}
+
+        elif self.observation_type == "hierarchical_diff_obs":
+            # Hierarchical differentiated observation (bay + stack features)
+            diff_obs = self._create_hierarchical_diff_obs()
+
+            if self.action_mask_with_obs == "default":
+                return diff_obs
+            else:
+                return {"observation": diff_obs, "mask": mask}
 
         else:
             raise ValueError(f"Unknown observation_type: {self.observation_type}")

@@ -14,12 +14,26 @@ from __future__ import annotations
 from typing import Any
 from sb3_contrib.ppo_mask import MaskablePPO
 from envs.stack_gym import StackEnv
+from envs.hierarchical_envs.hierarchical_low_level_env import HierarchicalLowLevelEnv
+from envs.hierarchical_envs.hierarchical_high_level_env import HierarchicalHighLevelEnv
 from sb3_contrib.common.wrappers import ActionMasker
-from utils import MaskedEvalCallback, mask_fn, create_parallel_envs
+from utils import (
+    MaskedEvalCallback,
+    mask_fn,
+    create_parallel_envs,
+    create_parallel_hierarchical_envs,
+    create_parallel_high_level_envs,
+)
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.callbacks import CallbackList
 from wandb.integration.sb3 import WandbCallback
 from models.transformer_policy import MaskableTransformerPolicy
+from models.transformer_bay_policy import MaskableBayTransformerPolicy
+from models.joint_hierarchical_policy import (
+    MaskableJointMlpPolicy,
+    MaskableJointTransformerPolicy,
+)
+from models.joint_diffobs_policy import MaskableDiffObsJointTransformerPolicy
 
 
 def create_env(
@@ -28,7 +42,14 @@ def create_env(
     render_mode: str | None,
     parallel: bool,
     n_parallel_envs: int,
-) -> tuple[SubprocVecEnv | StackEnv, ActionMasker]:
+    hierarchical: bool = False,
+    high_level_policy_type: str = "rule_based_grouped",
+    hierarchical_high_level: bool = False,
+    low_level_agent_type: str = "rule_based_grouped",
+    low_level_model_path: str | None = None,
+    joint_hierarchical: bool = False,
+    hierarchical_diffobs: bool = False,
+) -> tuple[SubprocVecEnv | StackEnv | HierarchicalLowLevelEnv | HierarchicalHighLevelEnv, ActionMasker]:
     """
     Build training and evaluation environments for the stowage stack task.
 
@@ -37,6 +58,10 @@ def create_env(
     Reward normalisation and clipping are disabled for the evaluation env so
     that reported scores reflect the true (un-scaled) reward signal.
 
+    When ``hierarchical=True``, environments are wrapped with
+    ``HierarchicalLowLevelEnv`` which embeds a fixed high-level bay-selection
+    agent.  The RL agent only learns the low-level stack selection.
+
     Args:
         config (dict): Environment configuration dict.
         seed (int | None): Random seed forwarded to the environment constructors.
@@ -44,6 +69,10 @@ def create_env(
         parallel (bool): If True, create a parallelized training env.
         n_parallel_envs (int): Number of parallel worker processes when
             parallel=True.  Ignored when parallel=False.
+        hierarchical (bool): Wrap envs with HierarchicalLowLevelEnv.
+        high_level_policy_type (str): Policy for the high-level agent
+            ("rule_based_grouped", "rule_based", "random").  Only used
+            when hierarchical=True.
 
     Returns:
         tuple with training environment and evaluation environment.
@@ -54,28 +83,108 @@ def create_env(
     eval_config["reward_norm"] = False  # Disable reward normalization for evaluation
     eval_config["reward_clip"] = False  # Disable reward clipping for evaluation
 
-    if parallel:
-        # Create parallel training envs
-        train_env = create_parallel_envs(
-            config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv
-        )
-        # Evaluation always runs in a single process.
+    if hierarchical_diffobs:
+        # Differentiated-observation hierarchical: bay head sees bay-level
+        # features, stack head sees per-bay stack features.
+        config["observation_type"] = "hierarchical_diff_obs"
+        eval_config["observation_type"] = "hierarchical_diff_obs"
+        if parallel:
+            train_env = create_parallel_envs(
+                config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv
+            )
+        else:
+            train_env = StackEnv(config=config, render_mode=render_mode)
+
         eval_env = StackEnv(config=eval_config, render_mode=None)
-        # in sb3, the eval env must also be masked otherwise model chooses incorrect actions.
+        eval_env = ActionMasker(eval_env, mask_fn)
+
+    elif joint_hierarchical:
+        # Joint hierarchical: RL learns bay+stack simultaneously via
+        # autoregressive policy.  Uses standard StackEnv directly.
+        if parallel:
+            train_env = create_parallel_envs(
+                config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv
+            )
+        else:
+            train_env = StackEnv(config=config, render_mode=render_mode)
+
+        eval_env = StackEnv(config=eval_config, render_mode=None)
+        eval_env = ActionMasker(eval_env, mask_fn)
+
+    elif hierarchical_high_level:
+        # High-level training: RL picks bay, low-level agent is fixed
+        ll_model_path = low_level_model_path if low_level_agent_type == "trained_model" else None
+        ll_policy_type = low_level_agent_type if low_level_agent_type != "trained_model" else "rule_based_grouped"
+
+        if parallel:
+            train_env = create_parallel_high_level_envs(
+                config,
+                low_level_policy_type=ll_policy_type,
+                low_level_model_path=ll_model_path,
+                n_envs=n_parallel_envs,
+                vec_env_cls=SubprocVecEnv,
+            )
+        else:
+            train_env = HierarchicalHighLevelEnv(
+                config=config,
+                low_level_policy_type=ll_policy_type,
+                low_level_model_path=ll_model_path,
+                render_mode=render_mode,
+            )
+
+        eval_env = HierarchicalHighLevelEnv(
+            config=eval_config,
+            low_level_policy_type=ll_policy_type,
+            low_level_model_path=ll_model_path,
+            render_mode=None,
+        )
+        eval_env = ActionMasker(eval_env, mask_fn)
+
+    elif hierarchical:
+        if parallel:
+            train_env = create_parallel_hierarchical_envs(
+                config,
+                high_level_policy_type=high_level_policy_type,
+                n_envs=n_parallel_envs,
+                vec_env_cls=SubprocVecEnv,
+            )
+        else:
+            train_env = HierarchicalLowLevelEnv(
+                config=config,
+                high_level_policy_type=high_level_policy_type,
+                render_mode=render_mode,
+            )
+
+        eval_env = HierarchicalLowLevelEnv(
+            config=eval_config,
+            high_level_policy_type=high_level_policy_type,
+            render_mode=None,
+        )
         eval_env = ActionMasker(eval_env, mask_fn)
     else:
-        # No parallel training env.
-        train_env = StackEnv(config=config, render_mode=render_mode)
+        if parallel:
+            # Create parallel training envs
+            train_env = create_parallel_envs(
+                config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv
+            )
+            # Evaluation always runs in a single process.
+            eval_env = StackEnv(config=eval_config, render_mode=None)
+            # in sb3, the eval env must also be masked otherwise model chooses incorrect actions.
+            eval_env = ActionMasker(eval_env, mask_fn)
+        else:
+            # No parallel training env.
+            train_env = StackEnv(config=config, render_mode=render_mode)
 
-        # Single-process evaluation env with the same render mode.
-        eval_env = StackEnv(config=eval_config, render_mode=render_mode)
-        eval_env = ActionMasker(eval_env, mask_fn)
+            # Single-process evaluation env with the same render mode.
+            eval_env = StackEnv(config=eval_config, render_mode=render_mode)
+            eval_env = ActionMasker(eval_env, mask_fn)
 
     return train_env, eval_env
 
 
 def create_model(
     train_env: SubprocVecEnv | StackEnv,
+    config: dict,
     device: str,
     parallel: bool,
     n_parallel_envs: int,
@@ -88,7 +197,19 @@ def create_model(
     n_epochs: int = 10,
     lr: float = 3e-4,
     vf_coef: float = 0.5,
+    ent_coef: float | None = None,
+    batch_size: int = 64,
+    n_steps_total: int = 2048,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+    lr_decay: bool = False,
     run: Any = None,
+    hierarchical_high_level: bool = False,
+    n_stacks: int | None = None,
+    n_rows_per_bay: int | None = None,
+    joint_hierarchical: bool = False,
+    hierarchical_diffobs: bool = False,
+    group_num: int | None = None,
 ) -> MaskablePPO:
     """
     Instantiate a MaskablePPO agent for the stowage stack environment.
@@ -126,39 +247,111 @@ def create_model(
         Model : MaskablePPO agent model ready for training.
     """
     # Scale n_steps inversely with the number of parallel envs so the total
-    # number of transitions collected per update (2048) remains constant.
+    # number of transitions collected per update remains constant.
     if parallel:
-        n_steps = 2048 // n_parallel_envs
+        n_steps = n_steps_total // n_parallel_envs
     else:
-        n_steps = 2048
+        n_steps = n_steps_total
 
-    if use_transformer:
-        # Attention-based policy with Pointer Network-style output.
-        policy = MaskableTransformerPolicy
+    # Determine container feature layout for transformer policies
+    # when using stack_features_v3 (5 scalar features per stack).
+    _container_kwargs = {}
+    if config.get("observation_type") == "stack_features_v3":
+        _container_kwargs = dict(container_start=2, container_dim=1)
+
+    # Default entropy coefficient
+    if ent_coef is None:
+        ent_coef = 0.15 if (joint_hierarchical or hierarchical_diffobs) else 0.3
+
+    if hierarchical_diffobs:
+        n_bays = n_stacks // n_rows_per_bay
+        bay_f_dim = group_num + 4
+        stack_f_dim = 5 * group_num + 5
+        policy = MaskableDiffObsJointTransformerPolicy
         policy_kwargs = dict(
+            n_bays=n_bays,
+            n_rows_per_bay=n_rows_per_bay,
+            bay_f_dim=bay_f_dim,
+            stack_f_dim=stack_f_dim,
+            group_num=group_num,
             embed_dim=embed_dim,
             n_heads=n_heads,
             n_layers=n_layers,
             vf_dim=vf_dim,
             tanh_clipping=tanh_clipping,
         )
+    elif joint_hierarchical:
+        n_bays = n_stacks // n_rows_per_bay
+        if use_transformer:
+            policy = MaskableJointTransformerPolicy
+            policy_kwargs = dict(
+                n_stacks=n_stacks,
+                n_bays=n_bays,
+                n_rows_per_bay=n_rows_per_bay,
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_layers=n_layers,
+                vf_dim=vf_dim,
+                tanh_clipping=tanh_clipping,
+                **_container_kwargs,
+            )
+        else:
+            policy = MaskableJointMlpPolicy
+            policy_kwargs = dict(
+                n_stacks=n_stacks,
+                n_bays=n_bays,
+                n_rows_per_bay=n_rows_per_bay,
+                vf_dim=vf_dim,
+            )
+    elif use_transformer:
+        if hierarchical_high_level:
+            # Bay-level pointer network for high-level agent
+            policy = MaskableBayTransformerPolicy
+            policy_kwargs = dict(
+                n_stacks=n_stacks,
+                n_rows_per_bay=n_rows_per_bay,
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_layers=n_layers,
+                vf_dim=vf_dim,
+                tanh_clipping=tanh_clipping,
+                **_container_kwargs,
+            )
+        else:
+            # Stack-level pointer network (original)
+            policy = MaskableTransformerPolicy
+            policy_kwargs = dict(
+                embed_dim=embed_dim,
+                n_heads=n_heads,
+                n_layers=n_layers,
+                vf_dim=vf_dim,
+                tanh_clipping=tanh_clipping,
+                **_container_kwargs,
+            )
     else:
         # MLP policy. Critic and actor networks share same backbonne architecture
         # but have separate heads.
         policy = "MlpPolicy"
         policy_kwargs = dict(net_arch=[256, 256, 32])
 
+    # Optional linear LR decay: ramps from `lr` down to 0 over training.
+    if lr_decay:
+        from stable_baselines3.common.utils import get_linear_fn
+        learning_rate = get_linear_fn(lr, 0.0, 1.0)
+    else:
+        learning_rate = lr
+
     model = MaskablePPO(
         policy=policy,
         env=train_env,
-        learning_rate=lr,
+        learning_rate=learning_rate,
         policy_kwargs=policy_kwargs,
         n_steps=n_steps,
-        batch_size=64,
+        batch_size=batch_size,
         n_epochs=n_epochs,
-        gamma=0.99,
-        gae_lambda=0.95,
-        ent_coef=0.3,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        ent_coef=ent_coef,
         vf_coef=vf_coef,
         clip_range=0.2,
         verbose=1,
@@ -246,7 +439,20 @@ def train(
     n_epochs: int = 10,
     lr: float = 3e-4,
     vf_coef: float = 0.5,
+    ent_coef: float | None = None,
+    batch_size: int = 64,
+    n_steps_total: int = 2048,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+    lr_decay: bool = False,
     run: Any = None,
+    hierarchical: bool = False,
+    high_level_policy_type: str = "rule_based_grouped",
+    hierarchical_high_level: bool = False,
+    low_level_agent_type: str = "rule_based_grouped",
+    low_level_model_path: str | None = None,
+    joint_hierarchical: bool = False,
+    hierarchical_diffobs: bool = False,
 ) -> None:
     """
     Training function.
@@ -275,6 +481,11 @@ def train(
         lr (float): Learning rate.
         vf_coef (float): Value-function loss coefficient in the PPO objective.
         run: Active W&B run object, or None to skip W&B logging.
+        hierarchical (bool): Use HierarchicalLowLevelEnv wrapper with a fixed
+            high-level agent for bay selection.
+        high_level_policy_type (str): Policy for the high-level agent
+            ("rule_based_grouped", "rule_based", "random").  Only used
+            when hierarchical=True.
     """
     seed = config.get("seed", None)
 
@@ -285,13 +496,24 @@ def train(
         render_mode=render_mode,
         parallel=parallel,
         n_parallel_envs=n_parallel_envs,
+        hierarchical=hierarchical,
+        high_level_policy_type=high_level_policy_type,
+        hierarchical_high_level=hierarchical_high_level,
+        low_level_agent_type=low_level_agent_type,
+        low_level_model_path=low_level_model_path,
+        joint_hierarchical=joint_hierarchical,
+        hierarchical_diffobs=hierarchical_diffobs,
     )
+
+    # Compute n_stacks and n_rows_per_bay for the bay-level transformer
+    n_stacks = config.get("yard_shape", (2, 2, 2))[0] * config.get("yard_shape", (2, 2, 2))[1]
+    n_rows_per_bay = config.get("yard_shape", (2, 2, 2))[1]
 
     # Build model
     model = create_model(
         train_env,
-        config,
-        device,
+        config=config,
+        device=device,
         parallel=parallel,
         n_parallel_envs=n_parallel_envs,
         use_transformer=use_transformer,
@@ -303,7 +525,19 @@ def train(
         n_epochs=n_epochs,
         lr=lr,
         vf_coef=vf_coef,
+        ent_coef=ent_coef,
+        batch_size=batch_size,
+        n_steps_total=n_steps_total,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        lr_decay=lr_decay,
         run=run,
+        hierarchical_high_level=hierarchical_high_level,
+        n_stacks=n_stacks,
+        n_rows_per_bay=n_rows_per_bay,
+        joint_hierarchical=joint_hierarchical,
+        hierarchical_diffobs=hierarchical_diffobs,
+        group_num=config.get("group_num", 3),
     )
 
     # Initialize callbacks

@@ -102,6 +102,8 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         n_layers: int = 2,
         dropout: float = 0.1,
         include_container_in_encoder: bool = True,
+        container_start: int | None = None,
+        container_dim: int | None = None,
     ) -> None:
         # features_dim set after computing n_stacks * embed_dim
         super().__init__(observation_space, features_dim=1)  # placeholder
@@ -112,22 +114,32 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         )
         f_per_stack = obs_dim // n_stacks
 
-        # Extracting group_num from stack_features layout: f_per_stack = 5*group_num + 5
-        if (f_per_stack - 5) % 5 != 0:
-            raise ValueError(
-                f"f_per_stack={f_per_stack} does not satisfy "
-                f"(f_per_stack - 5) % 5 == 0.  This policy requires "
-                f"observation_type='stack_features' with pos_embeddings=False."
-            )
-        group_num = (f_per_stack - 5) // 5
+        # When container_start and container_dim are explicitly provided
+        # (e.g. for stack_features_v3), skip the auto-derive logic.
+        if container_start is not None and container_dim is not None:
+            group_num = container_dim
+            cont_start = container_start
+            cont_end = container_start + container_dim
+        else:
+            # Extracting group_num from stack_features layout: f_per_stack = 5*group_num + 5
+            if (f_per_stack - 5) % 5 != 0:
+                raise ValueError(
+                    f"f_per_stack={f_per_stack} does not satisfy "
+                    f"(f_per_stack - 5) % 5 == 0.  This policy requires "
+                    f"observation_type='stack_features' with pos_embeddings=False "
+                    f"or explicit container_start/container_dim."
+                )
+            group_num = (f_per_stack - 5) // 5
+            cont_start = group_num + 2
+            cont_end = 2 * group_num + 2
 
         self.n_stacks = n_stacks
         self.embed_dim = embed_dim
         self.group_num = group_num
         self.include_container_in_encoder = include_container_in_encoder
-        # Slice offsets for the current-container one-hot within each stack feature vector:
-        self._cont_start = group_num + 2
-        self._cont_end = 2 * group_num + 2
+        # Slice offsets for the current-container features within each stack feature vector:
+        self._cont_start = cont_start
+        self._cont_end = cont_end
 
         # Encoder input: keep or strip the current_group_onehot (G features)
         enc_f_per_stack = (
@@ -374,6 +386,8 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
         vf_dim: int = 128,
         tanh_clipping: float = 10.0,
         include_container_in_encoder: bool = True,
+        container_start: int | None = None,
+        container_dim: int | None = None,
         **kwargs,
     ) -> None:
         # Extract num of stacks if not explicitily provided
@@ -396,6 +410,8 @@ class MaskableTransformerPolicy(MaskableActorCriticPolicy):
             n_layers=n_layers,
             dropout=dropout,
             include_container_in_encoder=include_container_in_encoder,
+            container_start=container_start,
+            container_dim=container_dim,
         )
 
         # Disable orthogonal init (performs poorly for transformers)

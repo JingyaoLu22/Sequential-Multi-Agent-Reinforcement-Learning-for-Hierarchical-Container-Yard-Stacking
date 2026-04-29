@@ -4,6 +4,8 @@ from stable_baselines3.common.callbacks import BaseCallback
 from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.ppo_mask import MaskablePPO
 from envs.stack_gym import StackEnv
+from envs.hierarchical_envs.hierarchical_low_level_env import HierarchicalLowLevelEnv
+from envs.hierarchical_envs.hierarchical_high_level_env import HierarchicalHighLevelEnv
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv
 import torch
@@ -96,7 +98,7 @@ class MaskedEvalCallback(BaseCallback):
             self.logger.dump(self.num_timesteps)
 
             # Save best model based on best mean eval reward
-            if self.save_best_model and mean_reward > self.best_mean_reward:
+            if self.save_best_model and mean_reward >= self.best_mean_reward:
                 self.best_mean_reward = mean_reward
                 path = f"{self.save_dir}/{self.save_filename}_best"
                 self.model.save(path)
@@ -190,6 +192,132 @@ def create_parallel_envs(
     return vec_env
 
 
+def make_hierarchical_env(
+    config: dict,
+    high_level_policy_type: str = "rule_based_grouped",
+    rank: int = 0,
+) -> Callable[[], ActionMasker]:
+    """
+    Factory for a single HierarchicalLowLevelEnv instance (parallel-safe).
+
+    Args:
+        config: Environment configuration dict
+        high_level_policy_type: Policy for the embedded high-level agent
+        rank: Environment ID for seeding in parallel setups
+
+    Returns:
+        Thunk that creates a wrapped HierarchicalLowLevelEnv.
+    """
+
+    def _init() -> ActionMasker:
+        env_config = config.copy()
+        if env_config.get("seed") is not None:
+            env_config["seed"] = config["seed"] + rank
+
+        env = HierarchicalLowLevelEnv(
+            config=env_config,
+            high_level_policy_type=high_level_policy_type,
+            render_mode=None,
+        )
+        env = ActionMasker(env, mask_fn)
+        env.reset(seed=env_config.get("seed"))
+        return env
+
+    return _init
+
+
+def create_parallel_hierarchical_envs(
+    config: dict,
+    high_level_policy_type: str = "rule_based_grouped",
+    n_envs: int = 4,
+    vec_env_cls: Type[VecEnv] = SubprocVecEnv,
+) -> VecEnv:
+    """
+    Create parallel HierarchicalLowLevelEnv environments.
+
+    Args:
+        config: Environment configuration dict
+        high_level_policy_type: Policy for the embedded high-level agent
+        n_envs: Number of parallel environments
+        vec_env_cls: VecEnv class
+
+    Returns:
+        Vectorized environment
+    """
+    env_fns = [
+        make_hierarchical_env(config, high_level_policy_type, i)
+        for i in range(n_envs)
+    ]
+    return vec_env_cls(env_fns)
+
+
+def make_high_level_env(
+    config: dict,
+    low_level_policy_type: str = "rule_based_grouped",
+    low_level_model_path: str | None = None,
+    rank: int = 0,
+) -> Callable[[], ActionMasker]:
+    """
+    Factory for a single HierarchicalHighLevelEnv instance (parallel-safe).
+
+    When ``low_level_model_path`` is provided the frozen RL agent is created
+    inside the thunk so each subprocess gets its own model copy.
+
+    Args:
+        config: Environment configuration dict
+        low_level_policy_type: Policy for the embedded low-level agent
+        low_level_model_path: Path to a saved MaskablePPO low-level checkpoint
+        rank: Environment ID for seeding in parallel setups
+
+    Returns:
+        Thunk that creates a wrapped HierarchicalHighLevelEnv.
+    """
+
+    def _init() -> ActionMasker:
+        env_config = config.copy()
+        if env_config.get("seed") is not None:
+            env_config["seed"] = config["seed"] + rank
+
+        env = HierarchicalHighLevelEnv(
+            config=env_config,
+            low_level_policy_type=low_level_policy_type,
+            low_level_model_path=low_level_model_path,
+            render_mode=None,
+        )
+        env = ActionMasker(env, mask_fn)
+        env.reset(seed=env_config.get("seed"))
+        return env
+
+    return _init
+
+
+def create_parallel_high_level_envs(
+    config: dict,
+    low_level_policy_type: str = "rule_based_grouped",
+    low_level_model_path: str | None = None,
+    n_envs: int = 4,
+    vec_env_cls: Type[VecEnv] = SubprocVecEnv,
+) -> VecEnv:
+    """
+    Create parallel HierarchicalHighLevelEnv environments.
+
+    Args:
+        config: Environment configuration dict
+        low_level_policy_type: Policy for the embedded low-level agent
+        low_level_model_path: Path to a saved MaskablePPO low-level checkpoint
+        n_envs: Number of parallel environments
+        vec_env_cls: VecEnv class
+
+    Returns:
+        Vectorized environment
+    """
+    env_fns = [
+        make_high_level_env(config, low_level_policy_type, low_level_model_path, i)
+        for i in range(n_envs)
+    ]
+    return vec_env_cls(env_fns)
+
+
 def save_model(model: MaskablePPO, dir: str, filename: str) -> None:
     """Utility function to save the trained model"""
     model.save(f"{dir}/{filename}")
@@ -206,9 +334,10 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "group_num": 3,
             "group_placement": "random",
             "seed": seed,
-            "observation_type": "stack_features",
+            "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
+            "stack_fill_penalty": True
         }
     elif size == "medium":
         config = {
@@ -218,9 +347,10 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "group_num": 4,
             "group_placement": "random",
             "seed": seed,
-            "observation_type": "stack_features",
+            "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
+            "stack_fill_penalty": True
         }
     elif size == "large":
         config = {
@@ -230,12 +360,52 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "group_num": 6,
             "group_placement": "random",
             "seed": seed,
-            "observation_type": "stack_features",
+            "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
+            "stack_fill_penalty": True
+        }
+    elif size == "large_v2":
+        config = {
+            "vessel_shape": (8, 5, 5),
+            "yard_shape": (8, 5, 5),
+            "num_containers": 200,
+            "group_num": 8,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True
+        }
+    elif size == "large_v3":
+        config = {
+            "vessel_shape": (10, 6, 5),
+            "yard_shape": (10, 6, 5),
+            "num_containers": 300,
+            "group_num": 10,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True
+        }
+    elif size == "large_v4":
+        config = {
+            "vessel_shape": (10, 8, 5),
+            "yard_shape": (10, 8, 5),
+            "num_containers": 400,
+            "group_num": 10,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True
         }
     else:
-        raise ValueError("Invalid size. Choose 'small', 'medium', or 'large'.")
+        raise ValueError("Invalid size. Choose 'small', 'medium', 'large', 'large_v2', 'large_v3', or 'large_v4'.")
 
     return config
 
