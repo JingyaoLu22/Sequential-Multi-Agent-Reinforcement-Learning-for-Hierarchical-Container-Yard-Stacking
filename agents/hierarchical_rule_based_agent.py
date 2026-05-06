@@ -279,6 +279,10 @@ class HighLevelAgent(BaseAgent):
                     best_bay = bay
                     break
 
+        # Final fallback: pick any valid bay (handles size-filtered edge cases)
+        if best_bay is None and len(valid_bays) > 0:
+            best_bay = list(valid_bays)[0]
+
         return best_bay
 
     def _rule_based_grouped_policy(
@@ -390,6 +394,10 @@ class HighLevelAgent(BaseAgent):
                 if bay_with_most_similar_containers is not None
                 else bay_with_least_containers
             )
+
+        # Final fallback: pick any valid bay (handles size-filtered edge cases)
+        if best_bay is None and len(valid_bays) > 0:
+            best_bay = list(valid_bays)[0]
 
         return best_bay
 
@@ -532,11 +540,9 @@ class LowLevelAgent(BaseAgent):
             if bay == selected_bay:
                 bay_valid_actions.append(action)
 
-        # Fallback for no valid actions in selected bay
+        # Fallback: if no valid actions in selected bay, use any valid action
         if len(bay_valid_actions) == 0:
-            raise RuntimeError(
-                "No valid actions available in selected bay for the low level agent."
-            )
+            return np.random.choice(valid_actions)
 
         return np.random.choice(bay_valid_actions)
 
@@ -565,6 +571,13 @@ class LowLevelAgent(BaseAgent):
         yard_state = observation["yard_state"]
         current_container = observation["current_container"]
         container_group = int(current_container[StateIds.GROUP.value])
+
+        # Build set of valid rows in selected bay from valid_actions
+        valid_rows_in_bay = set()
+        for action in valid_actions:
+            bay, row = self._action_to_bay_row(action)
+            if bay == selected_bay:
+                valid_rows_in_bay.add(row)
 
         # Mask to get only slots in selected bay
         bay_mask = yard_state[:, StateIds.BAY.value] == selected_bay
@@ -596,8 +609,9 @@ class LowLevelAgent(BaseAgent):
 
         # Rule 1 : Select stack (row) with most same-group containers (not full)
         for row, stack_data in stacks_info.items():
+            if row not in valid_rows_in_bay:
+                continue
             is_full = stack_data["occupied"] == max_tier
-            is_empty = stack_data["occupied"] == 0
 
             if not is_full and stack_data["same_group"] > best_stack_score:
                 best_stack_score = stack_data["same_group"]
@@ -606,12 +620,13 @@ class LowLevelAgent(BaseAgent):
         # Rule 2 : If no stack found in Rule 1, select first fully empty stack
         if best_row is None:
             for row, stack_data in stacks_info.items():
-                is_full = stack_data["occupied"] == max_tier
+                if row not in valid_rows_in_bay:
+                    continue
                 is_empty = stack_data["occupied"] == 0
                 if is_empty:
                     best_row = row
                     break
-                if not is_full:
+                if stack_data["occupied"] < max_tier:
                     fallback_best_row = row
 
         # Rule 3 : If no stack found in Rule 2, select any available stack (not full)
@@ -622,13 +637,13 @@ class LowLevelAgent(BaseAgent):
         if best_row is not None:
             return self._bay_row_to_action(selected_bay, best_row)
 
-        # Fallback: return first valid action in selected bay
+        # Fallback: return first valid action in selected bay, then any valid action
         for action in valid_actions:
             bay, row = self._action_to_bay_row(action)
             if bay == selected_bay:
                 return action
 
-        raise RuntimeError("No valid action found in selected bay")
+        return valid_actions[0]
 
     def _rule_based_grouped_policy(
         self, observation: dict, valid_actions: list[int], selected_bay: int
@@ -664,6 +679,13 @@ class LowLevelAgent(BaseAgent):
         # Mask to get only slots in selected bay
         bay_mask = yard_state[:, StateIds.BAY.value] == selected_bay
         bay_indices = np.where(bay_mask)[0]
+
+        # Build set of valid rows in selected bay from valid_actions
+        valid_rows_in_bay = set()
+        for action in valid_actions:
+            bay, row = self._action_to_bay_row(action)
+            if bay == selected_bay:
+                valid_rows_in_bay.add(row)
 
         # Get max number of tiers possible
         max_tier = int(yard_state[:, StateIds.TIER.value].max())
@@ -705,6 +727,8 @@ class LowLevelAgent(BaseAgent):
 
         # Rule 1 : Select stack (row) with most same-group containers (not full)
         for row, stack_data in stacks_info.items():
+            if row not in valid_rows_in_bay:
+                continue
             is_full = stack_data["occupied"] == max_tier
             is_empty = stack_data["occupied"] == 0
 
@@ -718,17 +742,17 @@ class LowLevelAgent(BaseAgent):
                 count_of_most_similar_containers_in_stack = stack_data["same_group"]
                 stack_with_most_similar_containers = row
 
-            # Collect list of empty rows in the selected bay
+            # Collect list of empty rows in the selected bay (only valid ones)
             if is_empty:
                 empty_rows.append(row)
 
         # Rule 2 : If no stack found in Rule 1 and selected bay is completely empty, select first empty stack
         if best_action is None:
-            if total_occupied_in_bay == 0:
+            if total_occupied_in_bay == 0 and len(empty_rows) > 0:
                 best_action = (selected_bay, empty_rows[0])
 
         # Rule 3 : If no stack found in Rule 2, select first empty stack closest to stack with most same-group containers
-        row_list = list(stacks_info.keys())
+        row_list = [r for r in stacks_info.keys() if r in valid_rows_in_bay]
 
         if stack_with_most_similar_containers is not None:
             # Using absolute difference to sort rows based on proximity to stack with most similar containers
@@ -766,12 +790,12 @@ class LowLevelAgent(BaseAgent):
                     break
 
         if best_action is None:
-            # Fallback: return first valid action in selected bay
+            # Fallback: return first valid action in selected bay, then any valid action
             for action in valid_actions:
                 bay, row = self._action_to_bay_row(action)
                 if bay == selected_bay:
                     return action
-            raise RuntimeError("No valid action found in selected bay")
+            return valid_actions[0]
 
         # Convert (bay, row) to action index
         return self._bay_row_to_action(best_action[0], best_action[1])
@@ -1047,6 +1071,11 @@ class HierarchicalAgent:
         selected_slot = self.low_level_agent.get_action(
             observation, valid_actions, selected_bay
         )
+
+        # Safety net: verify returned action is valid
+        valid_actions_list = list(valid_actions) if not isinstance(valid_actions, list) else valid_actions
+        if selected_slot not in valid_actions_list:
+            selected_slot = valid_actions_list[0]
 
         action_info = {"selected_bay": selected_bay, "selected_slot": selected_slot}
 

@@ -19,6 +19,7 @@ from envs.hierarchical_envs.hierarchical_high_level_env import HierarchicalHighL
 from sb3_contrib.common.wrappers import ActionMasker
 from utils import (
     MaskedEvalCallback,
+    SaveModelCallback,
     mask_fn,
     create_parallel_envs,
     create_parallel_hierarchical_envs,
@@ -254,7 +255,8 @@ def create_model(
         n_steps = n_steps_total
 
     # Determine container feature layout for transformer policies
-    # when using stack_features_v3 (5 scalar features per stack).
+    # when using stack_features_v3 (5 or 8 scalar features per stack).
+    # Container group is always at index 2 with dim 1, regardless of container_sizes.
     _container_kwargs = {}
     if config.get("observation_type") == "stack_features_v3":
         _container_kwargs = dict(container_start=2, container_dim=1)
@@ -370,13 +372,19 @@ def create_callbacks(
     save_dir: str,
     save_filename: str,
     max_reward_threshold: float | None = None,
+    checkpoint_freq: int = 1_000_000,
     run: Any = None,
 ) -> CallbackList:
     """
     Build the SB3 CallbackList used during model training for evaluation metrics
     and model saving.
 
-    Model is saved whenever a new best mean evaluation reward is achieved,
+    Model is saved in three ways:
+    1. Best eval model: Saved when a new best mean evaluation reward is achieved
+    2. Checkpoints: Saved at checkpoint_freq step intervals if save_model_flag=True
+    3. Final model: Saved at the end of training if save_model_flag=True
+
+    All models are saved in a subfolder: {save_dir}/{save_filename}/
 
     The MaskedEvalCallback periodically rolls out the
     current policy on the evaluation environment and saves the
@@ -386,28 +394,47 @@ def create_callbacks(
         eval_env: Action-masked evaluation environment.
         eval_freq (int): How often (in environment steps) to run evaluation.
         n_eval_episodes (int): Number of episodes per evaluation run.
-        save_model_flag (bool): Whether to save the best model to disk.
-        save_dir (str): Directory in which to save the best model checkpoint.
-        save_filename (str): Base filename for the checkpoint (without extension).
+        save_model_flag (bool): Whether to save the model to disk.
+        save_dir (str): Directory in which to save model checkpoints.
+        save_filename (str): Base filename for the checkpoints (also used for subfolder name).
         max_reward_threshold (float | None): Used during evaluation to
                  compute the percentage of episodes that achieve perfect episode for given yard.
+        checkpoint_freq (int): Frequency (in timesteps) for saving model checkpoints.
+                 Default: 1000000 (every 1M steps).
         run: Active W&B run object, or None to skip W&B logging.
 
     Returns:
         CallbackList: List of sb3 callbacks.
     """
-    # Core evaluation callback: tracks best reward and saves checkpoints.
+    import os
+    
+    # Create subfolder for all model saves
+    base_model_dir = os.path.join(save_dir, save_filename)
+    os.makedirs(base_model_dir, exist_ok=True)
+    
+    # Core evaluation callback: tracks best reward and saves best checkpoint.
     eval_callback = MaskedEvalCallback(
         eval_env=eval_env,
         eval_freq=eval_freq,
         n_eval_episodes=n_eval_episodes,
         save_best_model=save_model_flag,
-        save_dir=save_dir,
-        save_filename=save_filename,
+        save_dir=base_model_dir,
+        save_filename="best_model",
         max_reward_threshold=max_reward_threshold,
     )
 
     callback_list = [eval_callback]
+    
+    # Add periodic checkpoint callback
+    if save_model_flag:
+        checkpoint_callback = SaveModelCallback(
+            save_freq=checkpoint_freq,
+            save_dir=save_dir,
+            save_filename=save_filename,
+            verbose=1,
+        )
+        callback_list.append(checkpoint_callback)
+    
     if run is not None:
         # Stream scalars (reward, loss, entropy, etc) to Wandb.
         callback_list.append(WandbCallback(verbose=0))
@@ -430,6 +457,7 @@ def train(
     save_dir: str,
     save_filename: str,
     max_reward_threshold: float | None = None,
+    checkpoint_freq: int = 1_000_000,
     use_transformer: bool = False,
     embed_dim: int = 128,
     n_heads: int = 4,
@@ -549,11 +577,21 @@ def train(
         save_dir,
         save_filename,
         max_reward_threshold=max_reward_threshold,
+        checkpoint_freq=checkpoint_freq,
         run=run,
     )
 
     # Train
     model.learn(total_timesteps=timesteps, callback=callbacks)
+
+    # Save final model after training completes
+    if save_model_flag:
+        import os
+        base_model_dir = os.path.join(save_dir, save_filename)
+        os.makedirs(base_model_dir, exist_ok=True)
+        final_path = os.path.join(base_model_dir, "final_model")
+        model.save(final_path)
+        print(f"\nFinal model saved to {final_path}")
 
     # Close envs
     train_env.close()

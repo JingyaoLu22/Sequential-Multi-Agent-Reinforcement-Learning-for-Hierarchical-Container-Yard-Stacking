@@ -9,8 +9,14 @@ from envs.hierarchical_envs.hierarchical_high_level_env import HierarchicalHighL
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv
 import torch
+import os
 
 import numpy as np
+
+# Global toggle for 20ft/40ft container size feature.
+# When True, ~30% of containers are 40ft (rest 20ft) and stacks cannot mix sizes.
+# When False, all containers are treated as 20ft (original behaviour).
+ENABLE_CONTAINER_SIZES = True
 
 
 class MaskedEvalCallback(BaseCallback):
@@ -100,7 +106,7 @@ class MaskedEvalCallback(BaseCallback):
             # Save best model based on best mean eval reward
             if self.save_best_model and mean_reward >= self.best_mean_reward:
                 self.best_mean_reward = mean_reward
-                path = f"{self.save_dir}/{self.save_filename}_best"
+                path = f"{self.save_dir}/{self.save_filename}"
                 self.model.save(path)
                 if self.verbose:
                     print(
@@ -111,9 +117,9 @@ class MaskedEvalCallback(BaseCallback):
 
 
 class SaveModelCallback(BaseCallback):
-    """Callback to periodically save the model, overwriting the previous save.
-    Not being used currently (currently modle is saved withtin MaskedEvalCallback).
-    But will be needed in the future."""
+    """Callback to periodically save model checkpoints at fixed step intervals.
+    Creates a subfolder for each training run and saves checkpoints with step-based naming.
+    E.g., {save_dir}/{save_filename}/checkpoint_1000000_steps.zip"""
 
     def __init__(
         self,
@@ -126,13 +132,27 @@ class SaveModelCallback(BaseCallback):
         self.save_freq = save_freq
         self.save_dir = save_dir
         self.save_filename = save_filename
+        self.last_saved_step = 0
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.save_freq == 0:
-            path = f"{self.save_dir}/{self.save_filename}"
+        # Check if we've reached a new milestone (every save_freq steps)
+        current_milestone = (self.num_timesteps // self.save_freq) * self.save_freq
+        
+        # Only save if we've crossed a new milestone and it's not step 0
+        if current_milestone > self.last_saved_step and current_milestone > 0:
+            self.last_saved_step = current_milestone
+            
+            # Create subfolder: save_dir/save_filename/
+            base_dir = os.path.join(self.save_dir, self.save_filename)
+            os.makedirs(base_dir, exist_ok=True)
+            
+            # Save with step count in filename
+            checkpoint_name = f"checkpoint_{current_milestone}_steps"
+            
+            path = os.path.join(base_dir, checkpoint_name)
             self.model.save(path)
             if self.verbose:
-                print(f"Model saved to {path} at step {self.num_timesteps}")
+                print(f"Checkpoint saved to {path} at step {self.num_timesteps}")
         return True
 
 
@@ -337,7 +357,22 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
-            "stack_fill_penalty": True
+            "stack_fill_penalty": True,
+            "container_sizes": False
+        }
+    elif size == "small_with_margin":
+        config = {
+            "vessel_shape": (3, 3, 3),
+            "yard_shape": (3, 4, 3),
+            "num_containers": 27,
+            "group_num": 3,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True,
+            "container_sizes": True
         }
     elif size == "medium":
         config = {
@@ -350,7 +385,8 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
-            "stack_fill_penalty": True
+            "stack_fill_penalty": True,
+            "container_sizes": False
         }
     elif size == "large":
         config = {
@@ -363,7 +399,8 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
-            "stack_fill_penalty": True
+            "stack_fill_penalty": True,
+            "container_sizes": False
         }
     elif size == "large_v2":
         config = {
@@ -376,7 +413,8 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
-            "stack_fill_penalty": True
+            "stack_fill_penalty": True,
+            "container_sizes": False
         }
     elif size == "large_v3":
         config = {
@@ -389,7 +427,8 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
-            "stack_fill_penalty": True
+            "stack_fill_penalty": True,
+            "container_sizes": False
         }
     elif size == "large_v4":
         config = {
@@ -402,10 +441,81 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "observation_type": "stack_features_v3",
             "reward_norm": True,
             "reward_clip": True,
-            "stack_fill_penalty": True
+            "stack_fill_penalty": True,
+            "container_sizes": False
+        }
+    elif size == "medium_with_margin":
+        config = {
+            "vessel_shape": (4, 4, 4),
+            "yard_shape": (4, 5, 4),
+            "num_containers": 64,
+            "group_num": 4,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True,
+            "container_sizes": True
+        }
+    elif size == "large_with_margin":
+        config = {
+            "vessel_shape": (6, 6, 5),
+            "yard_shape": (6, 7, 5),
+            "num_containers": 180,
+            "group_num": 6,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True,
+            "container_sizes": True
+        }
+    elif size == "large_v2_with_margin":
+        config = {
+            "vessel_shape": (8, 5, 5),
+            "yard_shape": (8, 7, 5),
+            "num_containers": 200,
+            "group_num": 8,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True,
+            "container_sizes": True
+        }
+    elif size == "large_v3_with_margin":
+        config = {
+            "vessel_shape": (10, 6, 5),
+            "yard_shape": (10, 7, 5),
+            "num_containers": 300,
+            "group_num": 10,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True,
+            "container_sizes": True
+        }
+    elif size == "large_v4_with_margin":
+        config = {
+            "vessel_shape": (10, 8, 5),
+            "yard_shape": (10, 9, 5),
+            "num_containers": 400,
+            "group_num": 10,
+            "group_placement": "random",
+            "seed": seed,
+            "observation_type": "stack_features_v3",
+            "reward_norm": True,
+            "reward_clip": True,
+            "stack_fill_penalty": True,
+            "container_sizes": True
         }
     else:
-        raise ValueError("Invalid size. Choose 'small', 'medium', 'large', 'large_v2', 'large_v3', or 'large_v4'.")
+        raise ValueError("Invalid size. Choose 'small', 'small_with_margin', 'medium', 'medium_with_margin', 'large', 'large_with_margin', 'large_v2', 'large_v2_with_margin', 'large_v3', 'large_v3_with_margin', 'large_v4', or 'large_v4_with_margin'.")
 
     return config
 

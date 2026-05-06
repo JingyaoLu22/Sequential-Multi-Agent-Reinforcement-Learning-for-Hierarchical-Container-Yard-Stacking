@@ -1,5 +1,4 @@
 import argparse
-import os
 
 import wandb
 
@@ -15,14 +14,6 @@ def main(args):
     # Get device (GPU or CPU)
     device = get_device()
     print(f"Using device: {device}")
-
-    # For saving model.
-    # Create folder if it does not exist. If the target file already exists, overwrite it.
-    if args.save_model and args.save_dir:
-        os.makedirs(args.save_dir, exist_ok=True)
-        save_path = os.path.join(args.save_dir, args.save_filename)
-        if os.path.exists(save_path):
-            os.remove(save_path)
 
     # Initialize wandb run (unless disabled)
     run = None
@@ -50,6 +41,7 @@ def main(args):
         save_dir=args.save_dir,
         save_filename=args.save_filename,
         max_reward_threshold=args.max_reward_threshold,
+        checkpoint_freq=args.checkpoint_freq,
         use_transformer=args.use_transformer,
         embed_dim=args.embed_dim,
         n_heads=args.n_heads,
@@ -87,7 +79,7 @@ if __name__ == "__main__":
         "--size",
         type=str,
         default="small",
-        choices=["small", "medium", "large","large_v2","large_v3","large_v4"],
+        choices=["small", "small_with_margin", "medium", "medium_with_margin", "large", "large_with_margin", "large_v2", "large_v2_with_margin", "large_v3", "large_v3_with_margin", "large_v4", "large_v4_with_margin"],
         help="Size of the environment configuration.",
     )
     parser.add_argument(
@@ -116,7 +108,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_eval_episodes",
         type=int,
-        default=10,
+        default=30,
         help="Number of episodes to evaluate at each evaluation step.",
     )
     parser.add_argument(
@@ -147,6 +139,12 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Reward threshold for computing percent of episodes achieving max reward during evaluation.",
+    )
+    parser.add_argument(
+        "--checkpoint_freq",
+        type=int,
+        default=1_000_000,
+        help="Frequency (in timesteps) for saving model checkpoints (e.g., 1000000 = every 1M steps).",
     )
     # wandb args
     parser.add_argument(

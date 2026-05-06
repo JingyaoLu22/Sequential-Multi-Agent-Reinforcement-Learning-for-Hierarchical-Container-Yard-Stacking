@@ -12,6 +12,7 @@ class StateIds(Enum):
     TIER = 2
     IS_OCCUPIED = 3
     GROUP = 4
+    SIZE = 5  # 0 = 20ft, 1 = 40ft (only used when container_sizes is enabled)
 
 
 class StackEnv(gym.Env):
@@ -99,6 +100,7 @@ class StackEnv(gym.Env):
         self.reward_clip = config.get("reward_clip", False)
         self.pos_embeddings = config.get("pos_embeddings", False)
         self.stack_fill_penalty = config.get("stack_fill_penalty", False)
+        self.container_sizes = config.get("container_sizes", False)
         self._same_group_stack_available: bool = False
 
         if self.seed is None:
@@ -121,7 +123,7 @@ class StackEnv(gym.Env):
             warnings.warn(
                 f"Number of containers is set to {self.num_containers} as it exceeds the total vessel slots {self.total_vessel_slots}"
             )
-        self.num_slot_attrs = 5
+        self.num_slot_attrs = 6 if self.container_sizes else 5
 
         self.num_actions = (
             self.yard_shape[0] * self.yard_shape[1]
@@ -346,6 +348,11 @@ class StackEnv(gym.Env):
             else list(valid_actions)
         )
 
+        # If no valid actions remain (e.g. all stacks are size-incompatible), truncate
+        if not terminated and len(valid_actions_list) == 0:
+            truncated = True
+            info["all_actions_masked"] = True
+
         observation = self._create_observation()
         info.update(
             {
@@ -525,6 +532,21 @@ class StackEnv(gym.Env):
                                 shuffled_slots[start_idx:end_idx], StateIds.GROUP.value
                             ] = group
 
+            # Assign container sizes (20ft/40ft) when enabled
+            # 30% of containers within each group are 40ft
+            if self.container_sizes:
+                size_rng = np.random.RandomState(self.seed + 7919)
+                for group in range(self.group_num):
+                    group_mask = (
+                        (self.vessel_state[selected_slots, StateIds.GROUP.value] == group)
+                        & (self.vessel_state[selected_slots, StateIds.IS_OCCUPIED.value] == 1)
+                    )
+                    group_slots = selected_slots[group_mask]
+                    if len(group_slots) > 0:
+                        num_40ft = max(1, int(len(group_slots) * 0.3))
+                        perm = size_rng.permutation(len(group_slots))
+                        self.vessel_state[group_slots[perm[:num_40ft]], StateIds.SIZE.value] = 1
+
     def _generate_bay_coords(self, physical_bays: int) -> List[int]:
         """
         Generate initial bay coordinates based on the number of physical bays
@@ -599,6 +621,11 @@ class StackEnv(gym.Env):
         # Place container at the specified slot
         self.yard_state[yard_slot, StateIds.IS_OCCUPIED.value] = 1
         self.yard_state[yard_slot, StateIds.GROUP.value] = group
+
+        # Copy container size when container_sizes is enabled
+        if self.container_sizes:
+            size = self.vessel_state[vessel_container_idx, StateIds.SIZE.value]
+            self.yard_state[yard_slot, StateIds.SIZE.value] = size
 
         # Add stack to list of occupied stacks (used in reward function)
         self.yard_bay_row_occupied.add((bay, row))
@@ -793,6 +820,18 @@ class StackEnv(gym.Env):
             tiers = self.yard_state[occupied_indices, StateIds.TIER.value]
             top_idx = occupied_indices[np.argmax(tiers)]
             if self.yard_state[top_idx, StateIds.GROUP.value] == container_group:
+                # When container_sizes is enabled, only count stacks with compatible sizes
+                if self.container_sizes:
+                    current_size = int(
+                        self.vessel_state[
+                            self.current_vessel_container, StateIds.SIZE.value
+                        ]
+                    )
+                    stack_size = int(
+                        self.yard_state[occupied_indices[0], StateIds.SIZE.value]
+                    )
+                    if stack_size != current_size:
+                        continue
                 self._same_group_stack_available = True
                 return
 
@@ -918,6 +957,28 @@ class StackEnv(gym.Env):
 
         unique_bay_rows = set(zip(bays, rows))
 
+        # When container_sizes is enabled, exclude stacks with incompatible sizes
+        if self.container_sizes:
+            current_size = int(
+                self.vessel_state[self.current_vessel_container, StateIds.SIZE.value]
+            )
+            compatible_bay_rows = set()
+            for bay, row in unique_bay_rows:
+                stack_mask = (
+                    (self.yard_state[:, StateIds.BAY.value] == bay)
+                    & (self.yard_state[:, StateIds.ROW.value] == row)
+                    & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                )
+                occupied_indices = np.where(stack_mask)[0]
+                if len(occupied_indices) == 0:
+                    # Empty stack — any size can go here
+                    compatible_bay_rows.add((bay, row))
+                elif int(self.yard_state[occupied_indices[0], StateIds.SIZE.value]) == current_size:
+                    # Stack has same size containers
+                    compatible_bay_rows.add((bay, row))
+                # else: stack has different size — skip
+            unique_bay_rows = compatible_bay_rows
+
         # Convert each (bay, row) to action index
         for bay, row in unique_bay_rows:
             action = self._bay_row_to_action(bay, row)
@@ -990,6 +1051,8 @@ class StackEnv(gym.Env):
                 )
             else:
                 features_per_stack = 5 * self.group_num + 5
+                if self.container_sizes:
+                    features_per_stack += 3  # current_size, stack_size, size_match
                 return gym.spaces.Box(
                     low=0,
                     high=max(
@@ -1035,6 +1098,8 @@ class StackEnv(gym.Env):
             features_per_stack = (
                 3 * self.group_num + 2
             )  # 3 one-hot groups + num_occupied + stack_index
+            if self.container_sizes:
+                features_per_stack += 3  # current_size, stack_size, size_match
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
 
             return gym.spaces.Box(
@@ -1052,6 +1117,8 @@ class StackEnv(gym.Env):
             # [majority_group, num_occupied, current_container_group,
             #  adj_majority_group, stack_index]
             features_per_stack = 5
+            if self.container_sizes:
+                features_per_stack += 3  # current_size, stack_size, size_match
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
 
             return gym.spaces.Box(
@@ -1125,6 +1192,8 @@ class StackEnv(gym.Env):
             features_per_stack = 5 * self.group_num + 4 + 2 * self.yard_shape[1]
         else:
             features_per_stack = 5 * self.group_num + 5
+        if self.container_sizes:
+            features_per_stack += 3
         stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
 
         # Get current container group
@@ -1132,6 +1201,13 @@ class StackEnv(gym.Env):
         if self.current_vessel_container is not None:
             current_group = int(
                 self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+            )
+
+        # Current container size
+        current_size = -1
+        if self.container_sizes and self.current_vessel_container is not None:
+            current_size = int(
+                self.vessel_state[self.current_vessel_container, StateIds.SIZE.value]
             )
 
         # Calculate remaining containers per group in vessel
@@ -1230,9 +1306,29 @@ class StackEnv(gym.Env):
                     stack_features[stack_idx, feature_idx : feature_idx + pe_size] = (
                         self.stack_pos_encoding[stack_idx]
                     )
+                    feature_idx += pe_size
                 else:
                     # scalar positional index
                     stack_features[stack_idx, feature_idx] = stack_idx
+                    feature_idx += 1
+
+                # Container size features (when enabled)
+                if self.container_sizes:
+                    # current_container_size (0=20ft, 1=40ft)
+                    stack_features[stack_idx, feature_idx] = float(current_size) if current_size >= 0 else 0.0
+                    feature_idx += 1
+                    # stack_majority_size
+                    stack_majority_size = -1
+                    occupied_mask_size = stack_slots[:, StateIds.IS_OCCUPIED.value] == 1
+                    if np.any(occupied_mask_size):
+                        sizes = stack_slots[occupied_mask_size, StateIds.SIZE.value]
+                        stack_majority_size = int(np.bincount(sizes.astype(int)).argmax())
+                    stack_features[stack_idx, feature_idx] = float(stack_majority_size) if stack_majority_size >= 0 else 0.0
+                    feature_idx += 1
+                    # size_match
+                    if current_size >= 0 and (stack_majority_size < 0 or stack_majority_size == current_size):
+                        stack_features[stack_idx, feature_idx] = 1.0
+                    feature_idx += 1
 
                 stack_idx += 1
 
@@ -1259,6 +1355,8 @@ class StackEnv(gym.Env):
 
         num_stacks = len(yard_bays) * len(yard_rows)
         features_per_stack = 3 * self.group_num + 2
+        if self.container_sizes:
+            features_per_stack += 3
         stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
 
         # Get current container group (same for all stacks)
@@ -1266,6 +1364,13 @@ class StackEnv(gym.Env):
         if self.current_vessel_container is not None:
             current_container_group = int(
                 self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+            )
+
+        # Current container size
+        current_size = -1
+        if self.container_sizes and self.current_vessel_container is not None:
+            current_size = int(
+                self.vessel_state[self.current_vessel_container, StateIds.SIZE.value]
             )
 
         stack_idx = 0
@@ -1347,6 +1452,24 @@ class StackEnv(gym.Env):
 
                 # Feature: stack_index
                 stack_features[stack_idx, feature_idx] = stack_idx
+                feature_idx += 1
+
+                # Container size features (when enabled)
+                if self.container_sizes:
+                    # current_container_size
+                    stack_features[stack_idx, feature_idx] = float(current_size) if current_size >= 0 else 0.0
+                    feature_idx += 1
+                    # stack_majority_size
+                    stack_majority_size = -1
+                    if np.any(occupied_mask):
+                        sizes = stack_slots[occupied_mask, StateIds.SIZE.value]
+                        stack_majority_size = int(np.bincount(sizes.astype(int)).argmax())
+                    stack_features[stack_idx, feature_idx] = float(stack_majority_size) if stack_majority_size >= 0 else 0.0
+                    feature_idx += 1
+                    # size_match
+                    if current_size >= 0 and (stack_majority_size < 0 or stack_majority_size == current_size):
+                        stack_features[stack_idx, feature_idx] = 1.0
+                    feature_idx += 1
 
                 stack_idx += 1
 
@@ -1372,6 +1495,8 @@ class StackEnv(gym.Env):
 
         num_stacks = len(yard_bays) * len(yard_rows)
         features_per_stack = 5
+        if self.container_sizes:
+            features_per_stack += 3
         stack_features = np.full(
             (num_stacks, features_per_stack), -1.0, dtype=np.float32
         )
@@ -1381,6 +1506,13 @@ class StackEnv(gym.Env):
         if self.current_vessel_container is not None:
             current_container_group = float(
                 self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+            )
+
+        # Current container size (same for all stacks)
+        current_container_size = -1.0
+        if self.container_sizes and self.current_vessel_container is not None:
+            current_container_size = float(
+                self.vessel_state[self.current_vessel_container, StateIds.SIZE.value]
             )
 
         stack_idx = 0
@@ -1439,6 +1571,25 @@ class StackEnv(gym.Env):
 
                 # [4] stack_index
                 stack_features[stack_idx, 4] = float(stack_idx)
+
+                # Container size features (when enabled)
+                if self.container_sizes:
+                    # [5] current_container_size
+                    stack_features[stack_idx, 5] = current_container_size
+                    # [6] stack_majority_size (-1 if empty)
+                    if np.any(occupied_mask):
+                        sizes = stack_slots[occupied_mask, StateIds.SIZE.value]
+                        stack_features[stack_idx, 6] = float(
+                            np.bincount(sizes.astype(int)).argmax()
+                        )
+                    # else: stays -1
+                    # [7] size_match (1 if compatible, 0 if not, -1 if no container)
+                    if current_container_size >= 0:
+                        stack_size = stack_features[stack_idx, 6]
+                        if stack_size < 0 or stack_size == current_container_size:
+                            stack_features[stack_idx, 7] = 1.0
+                        else:
+                            stack_features[stack_idx, 7] = 0.0
 
                 stack_idx += 1
 
@@ -1695,7 +1846,7 @@ class StackEnv(gym.Env):
                     axis=0,
                 )
             else:
-                state = np.concatenate((state, np.zeros((1, 5), dtype=int)), axis=0)
+                state = np.concatenate((state, np.zeros((1, self.num_slot_attrs), dtype=int)), axis=0)
             state = state.flatten()
 
             if self.action_mask_with_obs == "default":
@@ -1945,10 +2096,11 @@ class StackEnv(gym.Env):
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 is_target = self._is_target_cell(i, is_vessel)
                 group = int(state[i, StateIds.GROUP.value])
+                size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
 
                 if bay % 2 == 1:
                     cell_info[(bay, row, tier)] = self._create_cell_props(
-                        is_occupied, is_target, i, group
+                        is_occupied, is_target, i, group, size
                     )
 
             # handle even bays
@@ -1958,6 +2110,7 @@ class StackEnv(gym.Env):
                 tier = int(state[i, StateIds.TIER.value])
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
+                size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
 
                 # Only apply even bay logic if it's occupied (maybe required later but not used currently)
                 if bay % 2 == 0 and is_occupied:
@@ -1965,7 +2118,7 @@ class StackEnv(gym.Env):
                         if 1 <= adj_bay <= bays * 2:
                             existing = cell_info.get(
                                 (adj_bay, row, tier),
-                                self._create_cell_props(False, False, None, group),
+                                self._create_cell_props(False, False, None, group, size),
                             )
                             existing["filled"] = True
                             existing["idx"] = i
@@ -1978,10 +2131,11 @@ class StackEnv(gym.Env):
                 tier = int(state[i, StateIds.TIER.value])
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
+                size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
 
                 if bay % 2 == 1:
                     cell_info[(bay, row, tier)] = self._create_cell_props(
-                        is_occupied, False, i, group
+                        is_occupied, False, i, group, size
                     )
 
             # handle even yard bays (should not be occupied but just in case)
@@ -1991,13 +2145,14 @@ class StackEnv(gym.Env):
                 tier = int(state[i, StateIds.TIER.value])
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
+                size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
 
                 # Only apply even bay logic if it's occupied (maybe required later but not used currently)
                 if bay % 2 == 0 and is_occupied:
                     for adj_bay in [bay - 1, bay + 1]:
                         if 1 <= adj_bay <= bays * 2:
                             cell_info[(adj_bay, row, tier)] = self._create_cell_props(
-                                is_occupied, False, i, group
+                                is_occupied, False, i, group, size
                             )
 
         return cell_info
@@ -2012,10 +2167,10 @@ class StackEnv(gym.Env):
         return False
 
     def _create_cell_props(
-        self, filled: bool, target: bool, idx: Optional[int], group: int
+        self, filled: bool, target: bool, idx: Optional[int], group: int, size: int = 0
     ) -> Dict[str, Any]:
         # Used for inheritance
-        return {"filled": filled, "target": target, "idx": idx, "group": group}
+        return {"filled": filled, "target": target, "idx": idx, "group": group, "size": size}
 
     def _get_cell_border_style(
         self, cell: Dict[str, Any]
@@ -2107,6 +2262,23 @@ class StackEnv(gym.Env):
 
         rect = pygame.Rect(x, y, width, height)
         pygame.draw.rect(self.screen, color, rect)
+
+        # Draw diagonal hash lines for 40ft containers
+        if cell["filled"] and cell.get("size", 0) == 1:
+            hash_color = (0, 0, 0)
+            spacing = 6
+            for offset in range(-max(width, height), max(width, height), spacing):
+                x1 = x + offset
+                y1 = y
+                x2 = x + offset + height
+                y2 = y + height
+                # Clip to cell rect
+                pygame.draw.line(
+                    self.screen, hash_color,
+                    (max(x, min(x + width, x1)), max(y, min(y + height, y1))),
+                    (max(x, min(x + width, x2)), max(y, min(y + height, y2))),
+                    1,
+                )
 
         line_color, line_width = self._get_cell_border_style(cell)
         pygame.draw.rect(self.screen, line_color, rect, line_width)
