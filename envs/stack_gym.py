@@ -13,6 +13,7 @@ class StateIds(Enum):
     IS_OCCUPIED = 3
     GROUP = 4
     SIZE = 5  # 0 = 20ft, 1 = 40ft (only used when container_sizes is enabled)
+    IS_IMO = 6  # 0 = normal, 1 = IMO/dangerous (only used when enable_imo is enabled)
 
 
 class StackEnv(gym.Env):
@@ -101,7 +102,10 @@ class StackEnv(gym.Env):
         self.pos_embeddings = config.get("pos_embeddings", False)
         self.stack_fill_penalty = config.get("stack_fill_penalty", False)
         self.container_sizes = config.get("container_sizes", False)
+        self.enable_imo = config.get("enable_imo", False)
+        self.random_group_sizes = config.get("random_group_sizes", False)
         self._same_group_stack_available: bool = False
+        self.imo_groups: set = set()  # Groups designated as IMO groups (set each episode)
 
         if self.seed is None:
             # Use instance-level RandomState for thread-safe parallel execution
@@ -123,7 +127,15 @@ class StackEnv(gym.Env):
             warnings.warn(
                 f"Number of containers is set to {self.num_containers} as it exceeds the total vessel slots {self.total_vessel_slots}"
             )
-        self.num_slot_attrs = 6 if self.container_sizes else 5
+        self.num_slot_attrs = 5
+        if self.container_sizes:
+            self.num_slot_attrs += 1  # SIZE at index 5
+        if self.enable_imo:
+            # IS_IMO comes after SIZE (or after GROUP if no sizes)
+            self.imo_attr_idx = self.num_slot_attrs
+            self.num_slot_attrs += 1
+        else:
+            self.imo_attr_idx = None
 
         self.num_actions = (
             self.yard_shape[0] * self.yard_shape[1]
@@ -322,6 +334,20 @@ class StackEnv(gym.Env):
         # Cache whether a same-group stack with space exists (used in reward rule_0)
         self._cache_pre_placement_stack_fill(yard_slot)
 
+        # IMO violation check: if current container is IMO and target/adjacent stacks
+        # have IMO containers of a different group, terminate with large negative reward
+        if self.enable_imo and int(self.vessel_state[self.current_vessel_container, self.imo_attr_idx]) == 1:
+            placement_bay = self.yard_state[yard_slot, StateIds.BAY.value]
+            placement_row = self.yard_state[yard_slot, StateIds.ROW.value]
+            current_group = int(self.vessel_state[self.current_vessel_container, StateIds.GROUP.value])
+            if not self._check_imo_compatible(placement_bay, placement_row, current_group):
+                reward = -1000.0
+                observation = self._create_observation()
+                info["yard_mask"] = valid_actions_list
+                info["imo_violation"] = True
+                terminated = True
+                return observation, reward, terminated, truncated, info
+
         # Calculate reward
         reward = self._calculate_reward(yard_slot)
 
@@ -497,17 +523,32 @@ class StackEnv(gym.Env):
             self.vessel_state[selected_slots, StateIds.IS_OCCUPIED.value] = 1
 
             if self.group_num > 1:
-                containers_per_group = num_to_set // self.group_num
+                # Compute per-group container counts
+                if self.random_group_sizes and self.group_num > 1:
+                    # Each group gets at least 1; distribute remaining via multinomial
+                    rng_gs = np.random.RandomState(self.seed + 3571)
+                    remainder = num_to_set - self.group_num
+                    if remainder > 0:
+                        sampled = rng_gs.multinomial(remainder, [1.0 / self.group_num] * self.group_num)
+                        group_counts = 1 + sampled
+                    else:
+                        # Edge case: fewer containers than groups — one each, some groups get 0
+                        group_counts = np.zeros(self.group_num, dtype=int)
+                        group_counts[:num_to_set] = 1
+                else:
+                    containers_per_group = num_to_set // self.group_num
+                    group_counts = np.array(
+                        [containers_per_group] * (self.group_num - 1)
+                        + [num_to_set - containers_per_group * (self.group_num - 1)]
+                    )
+
+                cumsum = np.cumsum(np.concatenate([[0], group_counts]))
 
                 if self.group_placement == "fixed":
                     # Fixed placement of groups
                     for group in range(self.group_num):
-                        start_idx = group * containers_per_group
-                        end_idx = (
-                            (group + 1) * containers_per_group
-                            if group < self.group_num - 1
-                            else num_to_set
-                        )
+                        start_idx = cumsum[group]
+                        end_idx = cumsum[group + 1]
 
                         if start_idx < end_idx:
                             self.vessel_state[
@@ -520,12 +561,8 @@ class StackEnv(gym.Env):
                     shuffled_indices = rng.permutation(num_to_set)
                     shuffled_slots = selected_slots[shuffled_indices]
                     for group in range(self.group_num):
-                        start_idx = group * containers_per_group
-                        end_idx = (
-                            (group + 1) * containers_per_group
-                            if group < self.group_num - 1
-                            else num_to_set
-                        )
+                        start_idx = cumsum[group]
+                        end_idx = cumsum[group + 1]
 
                         if start_idx < end_idx:
                             self.vessel_state[
@@ -546,6 +583,28 @@ class StackEnv(gym.Env):
                         num_40ft = max(1, int(len(group_slots) * 0.3))
                         perm = size_rng.permutation(len(group_slots))
                         self.vessel_state[group_slots[perm[:num_40ft]], StateIds.SIZE.value] = 1
+
+            # Assign IMO (dangerous) status when enabled
+            # 50% of groups are randomly designated as IMO groups
+            # 25% of containers within those groups are marked as IMO
+            if self.enable_imo:
+                imo_rng = np.random.RandomState(self.seed + 13331)
+                imo_group_count = max(1, self.group_num // 2)
+                self.imo_groups = set(
+                    imo_rng.choice(self.group_num, size=imo_group_count, replace=False).tolist()
+                )
+                for group in self.imo_groups:
+                    group_mask = (
+                        (self.vessel_state[selected_slots, StateIds.GROUP.value] == group)
+                        & (self.vessel_state[selected_slots, StateIds.IS_OCCUPIED.value] == 1)
+                    )
+                    group_slots = selected_slots[group_mask]
+                    if len(group_slots) > 0:
+                        num_imo = max(1, int(len(group_slots) * 0.25))
+                        perm = imo_rng.permutation(len(group_slots))
+                        self.vessel_state[group_slots[perm[:num_imo]], self.imo_attr_idx] = 1
+            else:
+                self.imo_groups = set()
 
     def _generate_bay_coords(self, physical_bays: int) -> List[int]:
         """
@@ -626,6 +685,11 @@ class StackEnv(gym.Env):
         if self.container_sizes:
             size = self.vessel_state[vessel_container_idx, StateIds.SIZE.value]
             self.yard_state[yard_slot, StateIds.SIZE.value] = size
+
+        # Copy IMO status when enable_imo is enabled
+        if self.enable_imo:
+            imo_status = self.vessel_state[vessel_container_idx, self.imo_attr_idx]
+            self.yard_state[yard_slot, self.imo_attr_idx] = imo_status
 
         # Add stack to list of occupied stacks (used in reward function)
         self.yard_bay_row_occupied.add((bay, row))
@@ -979,12 +1043,52 @@ class StackEnv(gym.Env):
                 # else: stack has different size — skip
             unique_bay_rows = compatible_bay_rows
 
+        # When enable_imo is enabled and current container is IMO,
+        # exclude stacks where same stack or adjacent stacks have IMO containers of a different group
+        if self.enable_imo and int(self.vessel_state[self.current_vessel_container, self.imo_attr_idx]) == 1:
+            current_group = int(self.vessel_state[self.current_vessel_container, StateIds.GROUP.value])
+            imo_compatible_bay_rows = set()
+            for bay, row in unique_bay_rows:
+                if self._check_imo_compatible(bay, row, current_group):
+                    imo_compatible_bay_rows.add((bay, row))
+            unique_bay_rows = imo_compatible_bay_rows
+
         # Convert each (bay, row) to action index
         for bay, row in unique_bay_rows:
             action = self._bay_row_to_action(bay, row)
             valid_actions.append(action)
 
         return np.array(valid_actions, dtype=int)
+
+    def _check_imo_compatible(self, bay: int, row: int, current_group: int) -> bool:
+        """
+        Check if placing an IMO container of current_group at (bay, row) is compatible.
+        Returns False if the target stack or any adjacent stack (left/right) contains
+        IMO containers of a DIFFERENT group.
+        IMO containers of the same group are always compatible.
+        """
+        stacks_to_check = [(bay, row)]
+        # Left adjacent
+        if row - 1 >= 1:
+            stacks_to_check.append((bay, row - 1))
+        # Right adjacent
+        if row + 1 <= self.yard_shape[1]:
+            stacks_to_check.append((bay, row + 1))
+
+        for check_bay, check_row in stacks_to_check:
+            stack_mask = (
+                (self.yard_state[:, StateIds.BAY.value] == check_bay)
+                & (self.yard_state[:, StateIds.ROW.value] == check_row)
+                & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                & (self.yard_state[:, self.imo_attr_idx] == 1)
+            )
+            imo_indices = np.where(stack_mask)[0]
+            if len(imo_indices) > 0:
+                # Check if any IMO container belongs to a different group
+                groups_in_stack = self.yard_state[imo_indices, StateIds.GROUP.value]
+                if np.any(groups_in_stack != current_group):
+                    return False
+        return True
 
     def action_masks(self) -> List[bool]:
         """
@@ -1039,6 +1143,10 @@ class StackEnv(gym.Env):
             if self.pos_embeddings:
                 # Replace scalar positional_index with 2 * max_frequency sin/cos features
                 features_per_stack = 5 * self.group_num + 4 + 2 * self.yard_shape[1]
+                if self.container_sizes:
+                    features_per_stack += 3
+                if self.enable_imo:
+                    features_per_stack += 2  # is_current_container_imo, adj_has_different_group_imo
                 return gym.spaces.Box(
                     low=-1,
                     high=max(
@@ -1053,6 +1161,8 @@ class StackEnv(gym.Env):
                 features_per_stack = 5 * self.group_num + 5
                 if self.container_sizes:
                     features_per_stack += 3  # current_size, stack_size, size_match
+                if self.enable_imo:
+                    features_per_stack += 2  # is_current_container_imo, adj_has_different_group_imo
                 return gym.spaces.Box(
                     low=0,
                     high=max(
@@ -1100,6 +1210,8 @@ class StackEnv(gym.Env):
             )  # 3 one-hot groups + num_occupied + stack_index
             if self.container_sizes:
                 features_per_stack += 3  # current_size, stack_size, size_match
+            if self.enable_imo:
+                features_per_stack += 2  # is_current_container_imo, adj_has_different_group_imo
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
 
             return gym.spaces.Box(
@@ -1119,6 +1231,8 @@ class StackEnv(gym.Env):
             features_per_stack = 5
             if self.container_sizes:
                 features_per_stack += 3  # current_size, stack_size, size_match
+            if self.enable_imo:
+                features_per_stack += 2  # is_current_container_imo, adj_has_different_group_imo
             num_stacks = self.yard_shape[0] * self.yard_shape[1]  # bays * rows
 
             return gym.spaces.Box(
@@ -1194,6 +1308,8 @@ class StackEnv(gym.Env):
             features_per_stack = 5 * self.group_num + 5
         if self.container_sizes:
             features_per_stack += 3
+        if self.enable_imo:
+            features_per_stack += 2
         stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
 
         # Get current container group
@@ -1330,6 +1446,36 @@ class StackEnv(gym.Env):
                         stack_features[stack_idx, feature_idx] = 1.0
                     feature_idx += 1
 
+                # IMO features (when enabled)
+                if self.enable_imo:
+                    # is_current_container_imo
+                    if self.current_vessel_container is not None:
+                        stack_features[stack_idx, feature_idx] = float(
+                            self.vessel_state[self.current_vessel_container, self.imo_attr_idx]
+                        )
+                    feature_idx += 1
+                    # adj_has_different_group_imo
+                    if self.current_vessel_container is not None:
+                        cur_group = int(self.vessel_state[self.current_vessel_container, StateIds.GROUP.value])
+                        has_diff_imo = 0.0
+                        for adj_row in [row - 1, row + 1]:
+                            if adj_row < 1 or adj_row > self.yard_shape[1]:
+                                continue
+                            adj_mask = (
+                                (self.yard_state[:, StateIds.BAY.value] == bay)
+                                & (self.yard_state[:, StateIds.ROW.value] == adj_row)
+                                & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                                & (self.yard_state[:, self.imo_attr_idx] == 1)
+                            )
+                            adj_imo_indices = np.where(adj_mask)[0]
+                            if len(adj_imo_indices) > 0:
+                                adj_groups = self.yard_state[adj_imo_indices, StateIds.GROUP.value]
+                                if np.any(adj_groups != cur_group):
+                                    has_diff_imo = 1.0
+                                    break
+                        stack_features[stack_idx, feature_idx] = has_diff_imo
+                    feature_idx += 1
+
                 stack_idx += 1
 
         return stack_features.flatten()
@@ -1357,6 +1503,8 @@ class StackEnv(gym.Env):
         features_per_stack = 3 * self.group_num + 2
         if self.container_sizes:
             features_per_stack += 3
+        if self.enable_imo:
+            features_per_stack += 2
         stack_features = np.zeros((num_stacks, features_per_stack), dtype=np.float32)
 
         # Get current container group (same for all stacks)
@@ -1471,6 +1619,36 @@ class StackEnv(gym.Env):
                         stack_features[stack_idx, feature_idx] = 1.0
                     feature_idx += 1
 
+                # IMO features (when enabled)
+                if self.enable_imo:
+                    # is_current_container_imo
+                    if self.current_vessel_container is not None:
+                        stack_features[stack_idx, feature_idx] = float(
+                            self.vessel_state[self.current_vessel_container, self.imo_attr_idx]
+                        )
+                    feature_idx += 1
+                    # adj_has_different_group_imo
+                    if self.current_vessel_container is not None:
+                        cur_group = int(self.vessel_state[self.current_vessel_container, StateIds.GROUP.value])
+                        has_diff_imo = 0.0
+                        for adj_row in [row - 1, row + 1]:
+                            if adj_row < 1 or adj_row > self.yard_shape[1]:
+                                continue
+                            adj_mask = (
+                                (self.yard_state[:, StateIds.BAY.value] == bay)
+                                & (self.yard_state[:, StateIds.ROW.value] == adj_row)
+                                & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                                & (self.yard_state[:, self.imo_attr_idx] == 1)
+                            )
+                            adj_imo_indices = np.where(adj_mask)[0]
+                            if len(adj_imo_indices) > 0:
+                                adj_groups = self.yard_state[adj_imo_indices, StateIds.GROUP.value]
+                                if np.any(adj_groups != cur_group):
+                                    has_diff_imo = 1.0
+                                    break
+                        stack_features[stack_idx, feature_idx] = has_diff_imo
+                    feature_idx += 1
+
                 stack_idx += 1
 
         return stack_features.flatten()
@@ -1485,9 +1663,16 @@ class StackEnv(gym.Env):
         - [2] current_container_group: group index of the container being placed (-1 if none)
         - [3] adj_majority_group: majority group in left+right adjacent stacks combined (-1 if none)
         - [4] stack_index: sequential positional index (0, 1, 2, ...)
+        Optional (when container_sizes=True):
+        - [5] current_container_size
+        - [6] stack_majority_size
+        - [7] size_match
+        Optional (when enable_imo=True):
+        - [N] is_current_container_imo: 1 if current container is IMO, 0 otherwise (-1 if no container)
+        - [N+1] adj_has_different_group_imo: 1 if adjacent stacks have IMO from different group, 0 otherwise (-1 if no container)
 
         Returns:
-            np.ndarray: Flattened feature vector for all stacks (shape: num_stacks * 5)
+            np.ndarray: Flattened feature vector for all stacks
         """
         yard_bays = np.unique(self.yard_state[:, StateIds.BAY.value])
         yard_bays = yard_bays[yard_bays % 2 == 1]  # only odd bays
@@ -1497,6 +1682,8 @@ class StackEnv(gym.Env):
         features_per_stack = 5
         if self.container_sizes:
             features_per_stack += 3
+        if self.enable_imo:
+            features_per_stack += 2
         stack_features = np.full(
             (num_stacks, features_per_stack), -1.0, dtype=np.float32
         )
@@ -1590,6 +1777,41 @@ class StackEnv(gym.Env):
                             stack_features[stack_idx, 7] = 1.0
                         else:
                             stack_features[stack_idx, 7] = 0.0
+
+                # IMO features (when enabled)
+                if self.enable_imo:
+                    imo_feat_start = 5 + (3 if self.container_sizes else 0)
+                    # [N] is_current_container_imo
+                    if self.current_vessel_container is not None:
+                        stack_features[stack_idx, imo_feat_start] = float(
+                            self.vessel_state[self.current_vessel_container, self.imo_attr_idx]
+                        )
+                    # else: stays -1
+
+                    # [N+1] adj_has_different_group_imo: 1 if left/right adjacent stacks
+                    # have IMO containers from a group different than current container's group
+                    if self.current_vessel_container is not None:
+                        current_group = int(
+                            self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
+                        )
+                        has_diff_imo = 0.0
+                        for adj_row in [row - 1, row + 1]:
+                            if adj_row < 1 or adj_row > self.yard_shape[1]:
+                                continue
+                            adj_mask = (
+                                (self.yard_state[:, StateIds.BAY.value] == bay)
+                                & (self.yard_state[:, StateIds.ROW.value] == adj_row)
+                                & (self.yard_state[:, StateIds.IS_OCCUPIED.value] == 1)
+                                & (self.yard_state[:, self.imo_attr_idx] == 1)
+                            )
+                            adj_imo_indices = np.where(adj_mask)[0]
+                            if len(adj_imo_indices) > 0:
+                                adj_groups = self.yard_state[adj_imo_indices, StateIds.GROUP.value]
+                                if np.any(adj_groups != current_group):
+                                    has_diff_imo = 1.0
+                                    break
+                        stack_features[stack_idx, imo_feat_start + 1] = has_diff_imo
+                    # else: stays -1
 
                 stack_idx += 1
 
@@ -2097,10 +2319,11 @@ class StackEnv(gym.Env):
                 is_target = self._is_target_cell(i, is_vessel)
                 group = int(state[i, StateIds.GROUP.value])
                 size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
+                is_imo = bool(state[i, self.imo_attr_idx]) if self.enable_imo else False
 
                 if bay % 2 == 1:
                     cell_info[(bay, row, tier)] = self._create_cell_props(
-                        is_occupied, is_target, i, group, size
+                        is_occupied, is_target, i, group, size, is_imo
                     )
 
             # handle even bays
@@ -2111,6 +2334,7 @@ class StackEnv(gym.Env):
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
                 size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
+                is_imo = bool(state[i, self.imo_attr_idx]) if self.enable_imo else False
 
                 # Only apply even bay logic if it's occupied (maybe required later but not used currently)
                 if bay % 2 == 0 and is_occupied:
@@ -2118,10 +2342,11 @@ class StackEnv(gym.Env):
                         if 1 <= adj_bay <= bays * 2:
                             existing = cell_info.get(
                                 (adj_bay, row, tier),
-                                self._create_cell_props(False, False, None, group, size),
+                                self._create_cell_props(False, False, None, group, size, is_imo),
                             )
                             existing["filled"] = True
                             existing["idx"] = i
+                            existing["is_imo"] = is_imo
                             cell_info[(adj_bay, row, tier)] = existing
         else:
             # Handle yard containers
@@ -2132,10 +2357,11 @@ class StackEnv(gym.Env):
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
                 size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
+                is_imo = bool(state[i, self.imo_attr_idx]) if self.enable_imo else False
 
                 if bay % 2 == 1:
                     cell_info[(bay, row, tier)] = self._create_cell_props(
-                        is_occupied, False, i, group, size
+                        is_occupied, False, i, group, size, is_imo
                     )
 
             # handle even yard bays (should not be occupied but just in case)
@@ -2146,13 +2372,14 @@ class StackEnv(gym.Env):
                 is_occupied = state[i, StateIds.IS_OCCUPIED.value] == 1
                 group = int(state[i, StateIds.GROUP.value])
                 size = int(state[i, StateIds.SIZE.value]) if self.container_sizes else 0
+                is_imo = bool(state[i, self.imo_attr_idx]) if self.enable_imo else False
 
                 # Only apply even bay logic if it's occupied (maybe required later but not used currently)
                 if bay % 2 == 0 and is_occupied:
                     for adj_bay in [bay - 1, bay + 1]:
                         if 1 <= adj_bay <= bays * 2:
                             cell_info[(adj_bay, row, tier)] = self._create_cell_props(
-                                is_occupied, False, i, group, size
+                                is_occupied, False, i, group, size, is_imo
                             )
 
         return cell_info
@@ -2167,10 +2394,10 @@ class StackEnv(gym.Env):
         return False
 
     def _create_cell_props(
-        self, filled: bool, target: bool, idx: Optional[int], group: int, size: int = 0
+        self, filled: bool, target: bool, idx: Optional[int], group: int, size: int = 0, is_imo: bool = False
     ) -> Dict[str, Any]:
         # Used for inheritance
-        return {"filled": filled, "target": target, "idx": idx, "group": group, "size": size}
+        return {"filled": filled, "target": target, "idx": idx, "group": group, "size": size, "is_imo": is_imo}
 
     def _get_cell_border_style(
         self, cell: Dict[str, Any]
@@ -2279,6 +2506,17 @@ class StackEnv(gym.Env):
                     (max(x, min(x + width, x2)), max(y, min(y + height, y2))),
                     1,
                 )
+
+        # Draw IMO indicator circle for dangerous containers
+        if cell["filled"] and cell.get("is_imo", False):
+            center_x = int(x + width / 2)
+            center_y = int(y + height / 2)
+            radius = int(min(width, height) * 0.35)
+            # Filled circle using the group's dark color
+            circle_color = group_colors[group_idx][1]
+            pygame.draw.circle(self.screen, circle_color, (center_x, center_y), radius)
+            # Black border ring for visibility
+            pygame.draw.circle(self.screen, (0, 0, 0), (center_x, center_y), radius, 2)
 
         line_color, line_width = self._get_cell_border_style(cell)
         pygame.draw.rect(self.screen, line_color, rect, line_width)

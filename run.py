@@ -11,6 +11,10 @@ def main(args):
     # Get environment config (based on args.size which is small, medium, or large)
     config = set_config(size=args.size, seed=args.seed)
 
+    # Apply optional config overrides from CLI flags
+    if args.random_group_sizes:
+        config["random_group_sizes"] = True
+
     # Get device (GPU or CPU)
     device = get_device()
     print(f"Using device: {device}")
@@ -108,7 +112,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_eval_episodes",
         type=int,
-        default=30,
+        default=10,
         help="Number of episodes to evaluate at each evaluation step.",
     )
     parser.add_argument(
@@ -289,6 +293,11 @@ if __name__ == "__main__":
         "--hierarchical_diffobs",
         action="store_true",
         help="Train with differentiated observations: bay head sees bay-level features, stack head sees per-bay stack features.",
+    )
+    parser.add_argument(
+        "--random_group_sizes",
+        action="store_true",
+        help="Randomize container count per group around equal average (min 1 per group, sum = num_containers). Varies per seed.",
     )
     args = parser.parse_args()
 
