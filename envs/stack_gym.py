@@ -25,6 +25,7 @@ class StackEnv(gym.Env):
     the container in the yard. The goal is to place similar group containers close together.
     """
 
+    # metadata needed for using gym wrapper
     metadata = {
         "render_modes": ["rgb_array"],
     }
@@ -44,13 +45,25 @@ class StackEnv(gym.Env):
                 - group_placement: Strategy for container group placement ("fixed" or "random")
                 - seed: Random seed for reproducibility
                 - action_mask: Action masking strategy
-                - reward_scheme: Reward calculation scheme ("default")
-                - observation_type: Observation format ("flat", "stack_features", "stack_features_simplev2", "flat_parsed")
-                - reward_norm: Whether to normalize reward
+                - reward_scheme: Reward calculation scheme ("default" or "simple_single_stack")
+                - reward_design: Reward function variant used by _calculate_reward ("default" or "majority_reward")
+                - observation_type: Observation format ("flat", "stack_features", "stack_features_simplev2",
+                  "stack_features_v3", "flat_parsed", "hierarchical_diff_obs")
+                - reward_norm: Whether to normalize/scale reward
                 - reward_clip: Whether to clip reward to a certain range
+                - pos_embeddings: Whether to use sinusoidal positional encoding (instead of a scalar
+                  stack index) in the "stack_features" observation type
+                - stack_fill_penalty: If True, penalize opening a new empty stack when another
+                  same-group stack with available space exists
+                - container_sizes: Whether containers have 40ft sizes, enabling per-container size
+                  tracking and stack size-compatibility constraints.
+                - enable_imo: Whether to simulate IMO (dangerous goods) containers, enabling placement
+                  compatibility constraints between IMO containers of different groups
+                - random_group_sizes: Whether to randomize container counts per group around an equal
+                  average (min 1 per group) instead of splitting containers evenly across groups
             render_mode: Rendering mode for visualization ("rgb_array")
 
-        Attributes:
+        Main Attributes:
             vessel_shape: Vessel storage dimensions tuple
             yard_shape: Yard storage dimensions tuple
             num_containers: Number of containers to place
@@ -60,12 +73,18 @@ class StackEnv(gym.Env):
             action_mask_with_obs: If set this returns action_mask along with observation. (not used currently but maybe needed later)
             reward_scheme: Reward calculation scheme (default or simple_single_stack)
             observation_type: State observation format (details in _create_observation method)
+            pos_embeddings: Whether stack_features uses sinusoidal positional encoding instead of a scalar index
+            stack_fill_penalty: Whether opening a new stack is only penalized when a same-group stack has space
+            container_sizes: Whether containers carry a 20ft/40ft size attribute
+            enable_imo: Whether IMO (dangerous goods) containers and their placement constraints are simulated
+            random_group_sizes: Whether per-group container counts are randomized instead of split evenly
+            imo_groups: Groups designated as IMO (dangerous goods) groups, re-set each episode
             total_vessel_slots: Total container slots in vessel
             total_yard_slots: Total container slots in yard
             total_timesteps: Current episode timestep counter
             total_containers_remaining: Containers pending placement
-            num_slot_attrs: Attributes per slot state (always 5)
-            num_actions: Number of discrete actions. Each action corresponds to a single stack in the yard (bay x row).
+            num_slot_attrs: Attributes per slot state.
+            num_actions: Number of discrete actions. Each action corresponds to a single stack in the yard (bay x row combination).
             num_vessel_bay: Total bays in vessel (including even bays that are not used for placement)
             num_yard_bay: Total bays in yard (including even bays that are not used for placement)
             total_vessel_coords: Total coordinates in vessel state (including even bays that are not used for placement)
@@ -74,7 +93,7 @@ class StackEnv(gym.Env):
             current_vessel_container: Current container index being retrieved
             current_retrieval_group: Current group being removed
             containers_retrieved: Number of containers removed so far
-            yard_bay_row_occupied: Set tracking occupied stack (bay x row) positions
+            yard_bay_row_occupied: Track occupied stack (bay x row) positions
             observation_space: Gymnasium observation space definition
             reward_norm: Whether to normalize reward
             reward_clip: Whether to clip reward to a certain range
@@ -82,7 +101,6 @@ class StackEnv(gym.Env):
             render_mode: Rendering visualization mode
             screen_width: Pixel width for rendering display
             screen_height: Pixel height for rendering display
-            screen: Pygame screen object for rendering
         """
         if config is None:
             config = {}
@@ -105,7 +123,7 @@ class StackEnv(gym.Env):
         self.enable_imo = config.get("enable_imo", False)
         self.random_group_sizes = config.get("random_group_sizes", False)
         self._same_group_stack_available: bool = False
-        self.imo_groups: set = set()  # Groups designated as IMO groups (set each episode)
+        self.imo_groups: set = set()
 
         if self.seed is None:
             # Use instance-level RandomState for thread-safe parallel execution
@@ -156,7 +174,6 @@ class StackEnv(gym.Env):
             self.total_yard_coords + 1
         )  # yard_state + current container (no vessel_state)
 
-        # Sequencer
         self.current_vessel_container = (
             None  # Index of container currently being retrieved
         )
@@ -315,23 +332,7 @@ class StackEnv(gym.Env):
             terminated = True
             return observation, reward, terminated, truncated, info
 
-        # Container can only be placed in same bay or adjacent bays (left/right) (REMOVING THIS FOR NOW AS PER DISCUSSION)
-        # Huge negative reward if agent tries to place container in non-adjacent bay.
-        # In this case, action does not change environment
-
-        # Check if placement bay is adjacent to vessel container's bay
-        # vessel_container_bay = self.vessel_state[self.current_vessel_container, StateIds.BAY.value]
-        # yard_placement_bay = self.yard_state[yard_slot, StateIds.BAY.value]
-
-        # allowed_bays = [vessel_container_bay - 2, vessel_container_bay, vessel_container_bay + 2]
-        # if yard_placement_bay not in allowed_bays:
-        # reward = -100.0
-        # observation = self._create_observation()
-        # info["yard_mask"] = valid_actions_list
-        # terminated = False
-        # return observation, reward, terminated, truncated, info
-
-        # Cache whether a same-group stack with space exists (used in reward rule_0)
+        # Cache whether a same-group stack with space exists (used in reward rule 0)
         self._cache_pre_placement_stack_fill(yard_slot)
 
         # IMO violation check: if current container is IMO and target/adjacent stacks
@@ -393,12 +394,13 @@ class StackEnv(gym.Env):
     def reset(
         self, seed: Optional[int] = None, **kwargs
     ) -> Tuple[Union[np.ndarray, Dict], Dict]:
-        """Reset environment wrapper"""
+        """Reset environment wrapper needed for gymnasium compatibility. 
+        Calls internal _reset method to reset the environment state."""
         if seed is not None:
             self.seed = seed
         else:
             # Increment seed deterministically so each parallel env
-            # maintains its own diverging seed sequence from its rank offset
+            # maintains its own diverging seed for parallel envs
             self.seed += 1
         self._reset()
         observation = self._create_observation()
@@ -525,6 +527,7 @@ class StackEnv(gym.Env):
             if self.group_num > 1:
                 # Compute per-group container counts
                 if self.random_group_sizes and self.group_num > 1:
+                    # Randomized containers per group logic
                     # Each group gets at least 1; distribute remaining via multinomial
                     rng_gs = np.random.RandomState(self.seed + 3571)
                     remainder = num_to_set - self.group_num
@@ -536,6 +539,7 @@ class StackEnv(gym.Env):
                         group_counts = np.zeros(self.group_num, dtype=int)
                         group_counts[:num_to_set] = 1
                 else:
+                    # Evenly distribute number of containers per group
                     containers_per_group = num_to_set // self.group_num
                     group_counts = np.array(
                         [containers_per_group] * (self.group_num - 1)
@@ -655,7 +659,8 @@ class StackEnv(gym.Env):
 
         # Randomly select one of the topmost containers
         # NOTE : self.total_timesteps is used within rng to ensure different stacks are selected while selecting container from vessel
-        # Without this, the containers from same stack is selcted repeatedly until that stack is empty and then it moves to next stack.
+        # Without this, the containers from same stack is selcted repeatedly for unloading
+        # until that stack is empty and then it moves to next stack.
         rng = np.random.RandomState(self.seed + self.total_timesteps)
         selected_idx = rng.choice(topmost_containers)
 
@@ -670,7 +675,7 @@ class StackEnv(gym.Env):
         self, yard_slot: int, vessel_container_idx: int
     ) -> None:
         """
-        Place vessel container in yard at specified slot.
+        Place the vessel container (at vessel_container_idx) in yard at specified slot (yard_slot).
         Note: yard_slot is already the correct index (lowest unoccupied tier) as determined by _action_to_yard_slot().
         """
         bay = self.yard_state[yard_slot, StateIds.BAY.value]
@@ -698,8 +703,8 @@ class StackEnv(gym.Env):
     def _calculate_reward(self, yard_action: int) -> float:
         """
         Routes to the appropriate reward function based on self.reward_design.
-            - "default"        -> _calculate_default_reward
-            - "majority_reward" -> _calculate_majority_reward
+            - default        -> _calculate_default_reward
+            - majority_reward -> _calculate_majority_reward (not used in Thesis)
         """
         if self.reward_design == "majority_reward":
             reward = self._calculate_majority_reward(yard_action)
@@ -729,13 +734,7 @@ class StackEnv(gym.Env):
         ]
 
         reward = 0.0
-        """
-        rule_0_multiplier = 0.5
-        rule_1_multiplier = 20.0
-
-        rule_2_multiplier = 10.0
-        rule_3_multiplier = 2.0
-        """
+        
         rule_0_multiplier = 2.0
         rule_1_multiplier = 2.0
 
@@ -745,7 +744,7 @@ class StackEnv(gym.Env):
         # Rule 0: Penalty for occupying new ground slot in unoccupied stack.
         # If stack_fill_penalty is True, only penalise when another same-group stack
         # with available space exists (agent skipped a better stacking opportunity).
-        # If stack_fill_penalty is False, always penalise (original behaviour).
+        # If stack_fill_penalty is False, always penalise opening a new stack.
         if (placement_bay, placement_row) not in self.yard_bay_row_occupied:
             if not self.stack_fill_penalty or self._same_group_stack_available:
                 reward -= rule_0_multiplier
@@ -849,7 +848,7 @@ class StackEnv(gym.Env):
         container at its top AND has space remaining.
 
         Only computed when stack_fill_penalty is True.
-        The cached boolean is consumed by rule_0 in _calculate_default_reward.
+        The cached boolean is used by rule 0 in _calculate_default_reward.
         """
         if not self.stack_fill_penalty:
             self._same_group_stack_available = False
@@ -905,7 +904,7 @@ class StackEnv(gym.Env):
         """
         Return the most common group in the given (bay, row) stack among occupied slots.
         Returns None if the stack has no occupied slots (i.e. it is empty).
-        Ties are broken by the lowest group index (numpy argmax default).
+        Used by majority reward scheme (not used in Thesis).
         """
         bay_row_mask = (
             (self.yard_state[:, StateIds.BAY.value] == bay)
@@ -921,7 +920,7 @@ class StackEnv(gym.Env):
 
     def _calculate_majority_reward(self, yard_action: int) -> float:
         """
-        Alternate reward design based on majority group matching.
+        Alternate reward design based on majority group matching (not used in Thesis).
 
         Rules (applied before the container is placed):
 
@@ -939,8 +938,6 @@ class StackEnv(gym.Env):
           Rule 5: Exactly one of two non-empty adjacents matches c     -> -0.3
           Rule 6: All non-empty adjacents (1 or 2) do NOT match c     -> -0.6
           (Rules 4-6 are skipped if there are no non-empty adjacent stacks.)
-
-        No reward clipping is applied.
         """
         placement_bay = self.yard_state[yard_action, StateIds.BAY.value]
         placement_row = self.yard_state[yard_action, StateIds.ROW.value]
@@ -950,7 +947,6 @@ class StackEnv(gym.Env):
 
         reward = 0.0
 
-        # --- Stack rules ---
         stack_is_empty = (
             placement_bay,
             placement_row,
@@ -966,7 +962,7 @@ class StackEnv(gym.Env):
                 reward -= 1.0
             # majority == container_group -> +0 (no change)
 
-        # --- Neighbourhood rules ---
+        # Neighbourhood rules
         # Collect majority groups of non-empty adjacent stacks (left then right)
         non_empty_adj_majorities = []
         if placement_row > 1:
@@ -983,7 +979,7 @@ class StackEnv(gym.Env):
                 1 for m in non_empty_adj_majorities if m == container_group
             )
             if match_count == len(non_empty_adj_majorities):
-                # Rule 4: all non-empty adjacents match c -> 0
+                # Rule 4: all non-empty adjacents match c
                 reward += 0.0
             elif match_count > 0:
                 # Rule 5: exactly one of two matches c
@@ -1107,6 +1103,7 @@ class StackEnv(gym.Env):
         Create sinusoidal positional encoding for stacks.
         Returns ndarray of shape (num_stacks, 2 * max_frequency).
         Stack indices are normalized to [0, 1) before applying sin/cos at each frequency.
+        (Did not use in thesis as results were not promising, but kept for future reference.)
         """
         p = np.arange(num_stacks) / num_stacks
         features = []
@@ -1120,9 +1117,13 @@ class StackEnv(gym.Env):
         Get observation space based on observation_type
         Returns appropriate gym.spaces.Box for the specified observation type
         Observation types are described in the _create_observation() method in detail but in summary:
-            - "flat": Original flat observation space with yard_state and current container attributes in a single array
-            - "stack_features": Stack-based feature observation space with features per stack
-            - "flat_parsed": Dictionary observation for rule-based agents with pre-parsed yard_state and current_container
+            - flat: Original flat observation space with yard_state and current container attributes in a single array
+            - stack_features: Stack-based feature space with one-hot group encodings per stack
+            - flat_parsed: Dictionary observation for rule-based agents with pre-parsed yard_state and current_container
+            - stack_features_simplev2: Simplified stack-based feature space using one-hot group encodings
+            - stack_features_v3 (best and used in Thesis): Compact stack-based feature space using scalar group indices instead of one-hot encodings
+            - hierarchical_diff_obs ( not used in Thesis): Bay-level features concatenated with per-bay stack-level features, for the
+              differentiated-observation joint hierarchical policy
         """
         if self.observation_type == "flat":
             # Original flat observation space
@@ -1655,6 +1656,7 @@ class StackEnv(gym.Env):
 
     def _create_stack_features_v3(self) -> np.ndarray:
         """
+        THIS IS THE BEST OBSERVATION SPACE SO FAR (USED IN THESIS)
         Transform yard_state into scalar stack-based features (no one-hot encoding).
 
         For each stack (bay, row combination), computes 5 scalar features:
@@ -1664,9 +1666,9 @@ class StackEnv(gym.Env):
         - [3] adj_majority_group: majority group in left+right adjacent stacks combined (-1 if none)
         - [4] stack_index: sequential positional index (0, 1, 2, ...)
         Optional (when container_sizes=True):
-        - [5] current_container_size
-        - [6] stack_majority_size
-        - [7] size_match
+        - [5] current_container_size: size of the container being placed (20 or 40 feet).
+        - [6] stack_majority_size: majority size of containers already in this stack (-1 if empty)
+        - [7] size_match: 1 if current container is compatible with stack (stack empty or same size), 0 if incompatible, -1 if no current container
         Optional (when enable_imo=True):
         - [N] is_current_container_imo: 1 if current container is IMO, 0 otherwise (-1 if no container)
         - [N+1] adj_has_different_group_imo: 1 if adjacent stacks have IMO from different group, 0 otherwise (-1 if no container)
@@ -1688,14 +1690,14 @@ class StackEnv(gym.Env):
             (num_stacks, features_per_stack), -1.0, dtype=np.float32
         )
 
-        # Current container group (same for all stacks)
+        # Current container group
         current_container_group = -1.0
         if self.current_vessel_container is not None:
             current_container_group = float(
                 self.vessel_state[self.current_vessel_container, StateIds.GROUP.value]
             )
 
-        # Current container size (same for all stacks)
+        # Current container size
         current_container_size = -1.0
         if self.container_sizes and self.current_vessel_container is not None:
             current_container_size = float(
@@ -1819,7 +1821,7 @@ class StackEnv(gym.Env):
 
     def _create_bay_features(self) -> np.ndarray:
         """
-        Create bay-level summary features for the hierarchical differentiated observation.
+        Create bay-level summary features for the hierarchical differentiated observation (for diffobs observation type).
 
         For each bay computes:
         - bay_index: 1-indexed sequential bay number (1, 2, 3, ...)
@@ -1903,6 +1905,7 @@ class StackEnv(gym.Env):
 
     def _create_stack_features_relative(self) -> np.ndarray:
         """
+        For diffobs observation type.
         Same as _create_stack_features() but with relative positional index per bay
         (0, 1, ..., n_rows-1) instead of global stack index.
         Stacks are ordered bay-major: all rows of bay 0, then all rows of bay 1, etc.
@@ -2013,7 +2016,7 @@ class StackEnv(gym.Env):
 
     def _create_hierarchical_diff_obs(self) -> np.ndarray:
         """
-        Create the hierarchical differentiated observation.
+        Create the hierarchical differentiated observation. Training with RL not working with this currently.
 
         Layout: [bay_features.flatten() | stack_features.flatten()]
         - bay_features: (n_bays, bay_f_dim) flattened
@@ -2028,30 +2031,64 @@ class StackEnv(gym.Env):
 
     def _create_observation(self) -> Union[np.ndarray, Dict]:
         """
-        Create observation based on observation_type
+        Create observation based on observation_type.
+
+        When action_mask_with_obs != "default", all types except "flat_parsed" return a dict
+        {"observation": <array>, "mask": <action_mask>} instead of a plain array.
 
         observation_type options:
         - "flat": Original flattened observation vector (yard_state + current container)
-        - "stack_features": Stack-based feature representation
-        - "flat_parsed": Dictionary with separate yard_state and current_container arrays
+        - "stack_features": Stack-based feature representation with one-hot encodings
+        - "stack_features_simplev2": Simplified stack features with one-hot encodings (fewer features than "stack_features")
+        - "stack_features_v3": Scalar stack features — no one-hot encoding (used in thesis)
+        - "flat_parsed": Dictionary with separate yard_state and current_container arrays (for rule-based agents, no mask)
+        - "hierarchical_diff_obs": Concatenation of bay-level and stack-level features (experimental)
 
         For "flat":
             Observation vector consists of:
             1. yard state (total_yard_coords i.e. number of yard slots)
             2. Current vessel selected container state (1).
             Therefore, obs_coords = total_yard_coords + 1
-            Each slot has 5 attributes (num_slot_attrs): bay, row, tier, is_occupied(0/1), group number of container
+            Each slot has num_slot_attrs attributes: bay, row, tier, is_occupied(0/1), group number of container
             Final flattened observation shape: (obs_coords * num_slot_attrs,)
 
         For "stack_features":
-            Each stack has features: [group_counts, num_occupied, num_empty, current_group_onehot,
-                                     left_row_max_group_onehot, right_row_max_group_onehot,
-                                     is_empty, has_remaining_slots, positional_index]
+            Per-stack features (shape: num_stacks * features_per_stack):
+            - count_group0 .. count_groupN: count of each group in the stack (one per group)
+            - num_occupied: number of occupied slots
+            - num_empty: number of empty slots
+            - current_group (one-hot): one-hot of current container's group
+            - left_row_max_group (one-hot): dominant group in left adjacent row
+            - right_row_max_group (one-hot): dominant group in right adjacent row
+            - vessel_remaining_per_group: remaining vessel containers per group
+            - is_empty: 1 if stack fully empty, 0 otherwise
+            - has_remaining_slots: 1 if at least one empty slot, 0 otherwise
+            - positional_index (pos_embeddings=False) OR sin/cos encoding (pos_embeddings=True)
+
+        For "stack_features_simplev2":
+            Per-stack features (shape: num_stacks * (3*group_num + 2[+3][+2])):
+            - max_group (one-hot): dominant group in this stack
+            - num_occupied_in_stack: number of occupied slots
+            - current_container_group (one-hot): current container's group
+            - left_right_row_max_group (one-hot): dominant group across both adjacent rows
+            - stack_index: sequential positional index
+            Optional (container_sizes=True): current_container_size, stack_majority_size, size_match
+            Optional (enable_imo=True): is_current_container_imo, adj_has_different_group_imo
+
+        For "stack_features_v3":
+            Per-stack scalar features — see _create_stack_features_v3() docstring for full spec.
+            Base 5 features + optional size features (3) + optional IMO features (2).
+            Recommended for RL training (used in thesis).
 
         For "flat_parsed":
             Dictionary with:
             - "yard_state": 2D array (total_yard_coords, num_slot_attrs)
             - "current_container": 1D array (num_slot_attrs,)
+
+        For "hierarchical_diff_obs":
+            Concatenation of bay_features.flatten() and stack_features.flatten().
+            bay_features shape: (n_bays, bay_f_dim); stack_features use relative positional indices.
+            Note: RL training with this observation type is currently experimental and not stable.
 
         """
         mask = self.action_masks() if self.action_mask_with_obs != "default" else None
@@ -2130,9 +2167,16 @@ class StackEnv(gym.Env):
         else:
             raise ValueError(f"Unknown observation_type: {self.observation_type}")
 
-    def render(self) -> Optional[np.ndarray]:
+    def render(self, enhanced_visibility: bool = False) -> Optional[np.ndarray]:
         """
         Render the environment as an RGB array (similar to stowage env)
+
+        Args:
+            enhanced_visibility: When True, uses an enhanced layout:
+                - Yard bays are wrapped into rows of at most 5 bays each
+                - Vessel section shows only the current selected container box (no full grid)
+                - Bay number labels use a larger font
+                Default is False (original behavior is preserved).
         """
         if self.render_mode != "rgb_array":
             return None
@@ -2147,6 +2191,10 @@ class StackEnv(gym.Env):
 
         if not pygame.get_init():
             pygame.init()
+
+        if enhanced_visibility:
+            return self._render_enhanced()
+
         if self.screen is None:
             self.screen = pygame.Surface((self.screen_width, self.screen_height))
         self.screen.fill((255, 255, 255))
@@ -2184,6 +2232,284 @@ class StackEnv(gym.Env):
         return np.transpose(
             np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2)
         )
+
+    def _render_enhanced(self) -> np.ndarray:
+        """
+        Enhanced visibility render:
+        - Yard bays wrap after every 5 bays (multiple display rows)
+        - Vessel section shows only the current selected container box
+        - Bay labels use a larger font
+        """
+        import pygame
+
+        CELL_W, CELL_H = 35, 35
+        PADDING = 15
+        LEFT_MARGIN = 45   # space for tier labels on the left
+        ROW_LABEL_H = 20   # space for row-number labels below each row of cells
+        BAY_LABEL_FONT_SIZE = 36
+
+        yard_bays = self.yard_shape[0]
+        yard_rows = self.yard_shape[1]
+        yard_tiers = self.yard_shape[2]
+
+        font_title = pygame.font.Font(None, 46)
+        font_bay = pygame.font.Font(None, BAY_LABEL_FONT_SIZE)
+        font_small = pygame.font.Font(None, 20)
+        font_tiny = pygame.font.Font(None, 18)
+        colors = self._setup_colors()
+        fonts = {"small": font_small, "tiny": font_tiny}
+
+        # Measure rendered bay-label height for layout calculations
+        bay_label_h = font_bay.render("Bay 1", True, (0, 0, 0)).get_height() + 6
+        title_h = font_title.render("X", True, (0, 0, 0)).get_height() + 4
+
+        # Dynamic split: roughly half the bays on top row, rest on bottom row
+        # (always 2 display rows; if only 1 bay total, keep it on one row)
+        if yard_bays <= 1:
+            bays_per_row_list = [yard_bays]
+        else:
+            top_count = (yard_bays + 1) // 2  # ceiling half
+            bot_count = yard_bays - top_count
+            bays_per_row_list = [top_count, bot_count]
+        num_bay_rows = len(bays_per_row_list)
+        max_bays_in_row = max(bays_per_row_list)
+
+        screen_width = max(350, LEFT_MARGIN + max_bays_in_row * yard_rows * CELL_W + PADDING)
+
+        vessel_section_h = 100
+        single_bay_row_h = bay_label_h + yard_tiers * CELL_H + ROW_LABEL_H + 10
+
+        total_h = (
+            PADDING + title_h            # "Current Container" title
+            + vessel_section_h           # container box
+            + PADDING + title_h          # "Yard" title
+            + num_bay_rows * single_bay_row_h
+            + PADDING
+        )
+
+        enh_screen = pygame.Surface((screen_width, total_h))
+        enh_screen.fill((255, 255, 255))
+
+        # Temporarily redirect self.screen so existing draw helpers target the enhanced surface
+        old_screen = self.screen
+        self.screen = enh_screen
+
+        try:
+            # ── Vessel section ──────────────────────────────────────────
+            self.screen.blit(
+                font_title.render("Current Container", True, (0, 0, 0)),
+                (PADDING, PADDING),
+            )
+            vessel_top = PADDING + title_h
+            self._draw_enhanced_container_box(vessel_top, vessel_section_h, colors, fonts)
+
+            # ── Yard section ────────────────────────────────────────────
+            yard_label_y = vessel_top + vessel_section_h + PADDING
+            self.screen.blit(
+                font_title.render("Yard", True, (0, 0, 0)),
+                (PADDING, yard_label_y),
+            )
+            yard_top_start = yard_label_y + title_h
+
+            cell_info = self._build_cell_info(self.yard_state, yard_bays, False)
+            row_order = self._get_row_order(yard_rows, False)
+
+            cumulative_b = 0
+            for bay_row_idx in range(num_bay_rows):
+                row_top = yard_top_start + bay_row_idx * single_bay_row_h
+                cells_top = row_top + bay_label_h  # cells sit below the bay labels
+
+                # Tier labels on the left
+                for t in range(1, yard_tiers + 1):
+                    cy = cells_top + (yard_tiers - t) * CELL_H + CELL_H / 2
+                    tier_lbl = font_small.render(f"{t}", True, (0, 0, 0))
+                    self.screen.blit(
+                        tier_lbl,
+                        (LEFT_MARGIN - 18, int(cy - tier_lbl.get_height() / 2)),
+                    )
+
+                start_b = cumulative_b
+                end_b = start_b + bays_per_row_list[bay_row_idx]
+                cumulative_b = end_b
+
+                for b in range(start_b, end_b):
+                    bay_num = b * 2 + 1
+                    local_b = b - start_b
+                    bay_x = LEFT_MARGIN + local_b * yard_rows * CELL_W
+
+                    # Bay label (large font)
+                    bay_cx = bay_x + (yard_rows * CELL_W) / 2
+                    bay_lbl = font_bay.render(f"Bay {bay_num}", True, (0, 0, 0))
+                    self.screen.blit(
+                        bay_lbl,
+                        bay_lbl.get_rect(center=(int(bay_cx), row_top + bay_label_h // 2)),
+                    )
+
+                    for pos, r in enumerate(row_order):
+                        # Row number labels below cells
+                        x_lbl = bay_x + pos * CELL_W + CELL_W / 2
+                        row_lbl = font_small.render(f"{r}", True, (0, 0, 0))
+                        self.screen.blit(
+                            row_lbl,
+                            row_lbl.get_rect(
+                                center=(int(x_lbl), cells_top + yard_tiers * CELL_H + ROW_LABEL_H // 2)
+                            ),
+                        )
+
+                        # Cells for each tier
+                        for t in range(1, yard_tiers + 1):
+                            cx = bay_x + pos * CELL_W
+                            cy = cells_top + (yard_tiers - t) * CELL_H
+                            default_cell = self._create_cell_props(False, False, None, 0)
+                            cell = cell_info.get((bay_num, r, t), default_cell)
+                            self._draw_cell(cx, cy, CELL_W, CELL_H, cell, colors, fonts, False)
+
+                # Bay dividers (vertical lines between and around bays in this display row)
+                num_in_row = end_b - start_b
+                for div in range(num_in_row + 1):
+                    x_div = LEFT_MARGIN + div * yard_rows * CELL_W
+                    pygame.draw.line(
+                        self.screen,
+                        colors["bay_grid"],
+                        (x_div, cells_top),
+                        (x_div, cells_top + yard_tiers * CELL_H),
+                        2,
+                    )
+
+            result = np.transpose(
+                np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2)
+            )
+        finally:
+            self.screen = old_screen
+
+        return result
+
+    def _draw_enhanced_container_box(
+        self,
+        top: int,
+        section_h: int,
+        colors: Dict[str, Any],
+        fonts: Dict[str, Any],
+    ) -> None:
+        """
+        Draw the current vessel container as a labeled colored box (enhanced render mode only).
+        """
+        import pygame
+
+        box_size = min(section_h - 20, 70)
+        box_y = top + (section_h - box_size) // 2
+        font_info = pygame.font.Font(None, 30)
+
+        # Estimate the total width of box + gap + text block so we can centre the whole unit
+        GAP = 15
+        INFO_LINE_W = 160  # rough max width of the info text block
+
+        screen_w = self.screen.get_width()
+
+        if self.current_vessel_container is None:
+            all_done = (self.containers_retrieved >= self.num_containers)
+            status_msg = "All containers unloaded" if all_done else "No container selected"
+            status_lbl = font_info.render(status_msg, True, (80, 80, 80))
+            total_w = box_size + GAP + status_lbl.get_width()
+            box_x = (screen_w - total_w) // 2
+            # Draw empty white box with grey border
+            empty_rect = pygame.Rect(box_x, box_y, box_size, box_size)
+            pygame.draw.rect(self.screen, (255, 255, 255), empty_rect)
+            pygame.draw.rect(self.screen, (160, 160, 160), empty_rect, 2)
+            # Status message beside the box, vertically centred
+            text_x = box_x + box_size + GAP
+            self.screen.blit(status_lbl, (text_x, box_y + (box_size - status_lbl.get_height()) // 2))
+            # Progress stats right-aligned
+            unloaded = self.containers_retrieved
+            remaining = self.num_containers - self.containers_retrieved
+            font_progress = pygame.font.Font(None, 30)
+            stats_lines = [
+                f"Unloaded: {unloaded}",
+                f"Remaining: {remaining}",
+            ]
+            stats_right_x = screen_w - 15
+            for j, stat in enumerate(stats_lines):
+                stat_lbl = font_progress.render(stat, True, (30, 30, 30))
+                self.screen.blit(
+                    stat_lbl,
+                    (stats_right_x - stat_lbl.get_width(), box_y + j * 28),
+                )
+            return
+
+        idx = self.current_vessel_container
+        state = self.vessel_state
+        group = int(state[idx, StateIds.GROUP.value])
+        size = int(state[idx, StateIds.SIZE.value]) if self.container_sizes else 0
+        is_imo = bool(state[idx, self.imo_attr_idx]) if self.enable_imo else False
+
+        group_colors = colors["group_colors"]
+        group_idx = min(group, len(group_colors) - 1)
+        fill_color = group_colors[group_idx][1]
+
+        # Centre box + info block horizontally
+        total_w = box_size + GAP + INFO_LINE_W
+        box_x = (screen_w - total_w) // 2
+
+        rect = pygame.Rect(box_x, box_y, box_size, box_size)
+        pygame.draw.rect(self.screen, fill_color, rect)
+
+        # Diagonal hash lines for 40ft containers
+        if size == 1:
+            hash_color = (0, 0, 0)
+            spacing = 6
+            for offset in range(-box_size, box_size, spacing):
+                x1 = box_x + offset
+                y1 = box_y
+                x2 = box_x + offset + box_size
+                y2 = box_y + box_size
+                pygame.draw.line(
+                    self.screen, hash_color,
+                    (max(box_x, min(box_x + box_size, x1)), max(box_y, min(box_y + box_size, y1))),
+                    (max(box_x, min(box_x + box_size, x2)), max(box_y, min(box_y + box_size, y2))),
+                    1,
+                )
+
+        # IMO indicator circle for dangerous containers
+        if is_imo:
+            cx = int(box_x + box_size / 2)
+            cy = int(box_y + box_size / 2)
+            radius = int(box_size * 0.35)
+            pygame.draw.circle(self.screen, fill_color, (cx, cy), radius)
+            pygame.draw.circle(self.screen, (0, 0, 0), (cx, cy), radius, 2)
+
+        pygame.draw.rect(self.screen, (255, 0, 0), rect, 3)  # red border = target/selected
+
+        idx_lbl = pygame.font.Font(None, 38).render(f"{idx}", True, (255, 255, 255))
+        self.screen.blit(idx_lbl, idx_lbl.get_rect(center=(box_x + box_size // 2, box_y + box_size // 2)))
+
+        text_x = box_x + box_size + GAP
+        info_lines = [
+            f"Container #{idx}",
+            f"Group: {group}",
+            f"Size: {'40ft' if size == 1 else '20ft'}",
+        ]
+        if is_imo:
+            info_lines.append("IMO / Dangerous")
+
+        for i, line in enumerate(info_lines):
+            lbl = font_info.render(line, True, (0, 0, 0))
+            self.screen.blit(lbl, (text_x, box_y + i * 28))
+
+        # Progress stats: right-aligned to the screen's right edge
+        unloaded = self.containers_retrieved
+        remaining = self.num_containers - self.containers_retrieved
+        font_progress = pygame.font.Font(None, 30)
+        stats_lines = [
+            f"Unloaded: {unloaded}",
+            f"Remaining: {remaining}",
+        ]
+        stats_right_x = screen_w - 15  # right-align to screen right edge
+        for j, stat in enumerate(stats_lines):
+            stat_lbl = font_progress.render(stat, True, (30, 30, 30))
+            self.screen.blit(
+                stat_lbl,
+                (stats_right_x - stat_lbl.get_width(), box_y + j * 28),
+            )
 
     def _draw_grid(
         self,

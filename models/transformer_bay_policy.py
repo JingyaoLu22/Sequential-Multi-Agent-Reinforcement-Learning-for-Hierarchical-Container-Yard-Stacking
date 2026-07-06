@@ -1,17 +1,17 @@
 """
 Bay-level Transformer Pointer Network policy for the high-level agent.
 
-Reuses ``TransformerFeaturesExtractor`` and ``PointerDecoder`` from
-``transformer_policy.py`` without modification.  The key addition is a
-**bay pooling layer** that aggregates per-stack encoder embeddings into
+Reuses TransformerFeaturesExtractor and PointerDecoder from
+transformer_policy.py without modification.  The key addition is a
+bay pooling layer that aggregates per-stack encoder embeddings into
 per-bay embeddings before the pointer decoder produces bay-level logits.
 
-Stack ordering in ``_create_stack_features`` is bay-major: for each odd bay
-the rows are iterated in order, so contiguous chunks of ``n_rows_per_bay``
+Stack ordering in _create_stack_features is bay-major: for each odd bay
+the rows are iterated in order, so contiguous chunks of n_rows_per_bay
 stacks belong to the same physical bay.  This enables a simple reshape +
 mean-pool for bay aggregation.
 
-Architecture::
+Architecture:
 
     obs (B, N_stacks * F)
       └─ TransformerFeaturesExtractor (shared, unchanged)
@@ -44,16 +44,16 @@ from models.transformer_policy import (
 
 class BayTransformerActorCritic(nn.Module):
     """
-    Receives the shared encoder output ``(B, N_stacks*D + G)`` and produces:
-      - ``latent_pi``: ``(B, N_bays)``  — pointer logits over bays
-      - ``latent_vf``: ``(B, vf_dim)``  — value estimate
+    Receives the shared encoder output (B, N_stacks*D + G) and produces:
+      - latent_pi: (B, N_bays)  — pointer logits over bays
+      - latent_vf: (B, vf_dim)  — value estimate
 
     Parameters
     ----------
-    feature_dim    : int — ``N_stacks * embed_dim + group_num``
+    feature_dim    : int — N_stacks * embed_dim + group_num
     n_stacks       : int — total yard stacks (bays * rows)
     n_bays         : int — number of physical (odd) bays == action_space.n
-    n_rows_per_bay : int — rows per bay (``yard_shape[1]``)
+    n_rows_per_bay : int — rows per bay (yard_shape[1])
     embed_dim      : int — transformer model dimension
     group_num      : int — container one-hot size
     n_heads        : int — attention heads for PointerDecoder
@@ -113,7 +113,9 @@ class BayTransformerActorCritic(nn.Module):
     def _split_features(
         self, features: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Split ``(B, N_stacks*D + G)`` into GE and container_feats."""
+        """
+        Split (B, N_stacks*D + G) into GE and container_feats.
+        """
         enc_feats = features[:, : self._enc_size]
         container_feats = features[:, self._enc_size :]
         GE = enc_feats.view(features.shape[0], self.n_stacks, self.embed_dim)
@@ -160,7 +162,7 @@ class MaskableBayTransformerPolicy(MaskableActorCriticPolicy):
     ----------------------
     n_stacks       : int — total number of yard stacks (must be explicit
                      since action_space.n == n_bays, not n_stacks)
-    n_rows_per_bay : int — number of rows per bay (``yard_shape[1]``)
+    n_rows_per_bay : int — number of rows per bay (yard_shape[1])
 
     Optional policy_kwargs
     ----------------------

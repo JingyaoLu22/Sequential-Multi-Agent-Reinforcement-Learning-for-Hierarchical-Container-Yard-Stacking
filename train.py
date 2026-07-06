@@ -1,12 +1,12 @@
 """
 train.py
 
-High-level training utilities for the stowage stack environment using
+High-level training utilities for the stack environment using
 Maskable PPO. The functions used are :
 
     create_env       - Build training and evaluation envs.
     create_model     - Instantiate a MaskablePPO agent model (Transformer Pointer Net or Flat MLP).
-    create_callbacks - Assemble the SB3 callback chain used during `.learn()`.
+    create_callbacks - Assemble the SB3 callback chains.
     train            - Function to train the model.
 """
 
@@ -27,6 +27,7 @@ from utils import (
 )
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.callbacks import CallbackList
+from stable_baselines3.common.utils import get_linear_fn
 from wandb.integration.sb3 import WandbCallback
 from models.transformer_policy import MaskableTransformerPolicy
 from models.transformer_bay_policy import MaskableBayTransformerPolicy
@@ -59,9 +60,9 @@ def create_env(
     Reward normalisation and clipping are disabled for the evaluation env so
     that reported scores reflect the true (un-scaled) reward signal.
 
-    When ``hierarchical=True``, environments are wrapped with
-    ``HierarchicalLowLevelEnv`` which embeds a fixed high-level bay-selection
-    agent.  The RL agent only learns the low-level stack selection.
+    When hierarchical=True, environments are wrapped with
+    HierarchicalLowLevelEnv which embeds a fixed high-level bay-selection
+    agent. The RL agent only learns the low-level stack selection.
 
     Args:
         config (dict): Environment configuration dict.
@@ -87,6 +88,7 @@ def create_env(
     if hierarchical_diffobs:
         # Differentiated-observation hierarchical: bay head sees bay-level
         # features, stack head sees per-bay stack features.
+        # Learning does not work for this setting currently (Need to explore further)
         config["observation_type"] = "hierarchical_diff_obs"
         eval_config["observation_type"] = "hierarchical_diff_obs"
         if parallel:
@@ -100,8 +102,8 @@ def create_env(
         eval_env = ActionMasker(eval_env, mask_fn)
 
     elif joint_hierarchical:
-        # Joint hierarchical: RL learns bay+stack simultaneously via
-        # autoregressive policy.  Uses standard StackEnv directly.
+        # Joint hierarchical: For Training separate policy netowrks for selecting a bay (high-level policy)
+        # and then a stack in the selected bay (low-level policy)
         if parallel:
             train_env = create_parallel_envs(
                 config, n_envs=n_parallel_envs, vec_env_cls=SubprocVecEnv
@@ -113,7 +115,7 @@ def create_env(
         eval_env = ActionMasker(eval_env, mask_fn)
 
     elif hierarchical_high_level:
-        # High-level training: RL picks bay, low-level agent is fixed
+        # For sequential Hierarchical Training where one-level is fixed while the other is trained.
         ll_model_path = low_level_model_path if low_level_agent_type == "trained_model" else None
         ll_policy_type = low_level_agent_type if low_level_agent_type != "trained_model" else "rule_based_grouped"
 
@@ -170,7 +172,7 @@ def create_env(
             )
             # Evaluation always runs in a single process.
             eval_env = StackEnv(config=eval_config, render_mode=None)
-            # in sb3, the eval env must also be masked otherwise model chooses incorrect actions.
+            # In sb3 the eval env must also be masked otherwise model chooses incorrect actions.
             eval_env = ActionMasker(eval_env, mask_fn)
         else:
             # No parallel training env.
@@ -226,24 +228,33 @@ def create_model(
 
     Args:
         train_env: Training environment.
-        eval_env: Evaluation environment (unused here but kept for API symmetry).
-        config (dict): Environment configuration (currently unused inside this
-            function but available for future policy-specific settings).
+        config (dict): Environment configuration.
         device (str): PyTorch device string, e.g. "cpu" or "cuda".
         parallel (bool): Whether the training env is vectorised.
-        n_parallel_envs (int): Number of parallel workers (used to scale n_steps so the total rollout size stays near 2048)
+        n_parallel_envs (int): Number of parallel workers.
         use_transformer (bool): Use the Transformer policy instead of MLP.
         embed_dim (int): Embedding dimension for the Transformer encoder.
         n_heads (int): Number of attention heads in the Transformer encoder.
         n_layers (int): Number of Transformer encoder layers.
         vf_dim (int): Hidden dimension of the value-function MLP head.
-        tanh_clipping (float): Clip logits to [-tanh_clipping, tanh_clipping]
-                         before computing action probabilities (Pointer Network trick).
+        tanh_clipping (float): Clip logits to [-tanh_clipping, tanh_clipping] before computing action probabilities).
         n_epochs (int): Number of PPO gradient update epochs per rollout.
         lr (float): Learning rate.
         vf_coef (float): Value-function loss coefficient in the PPO objective.
-        run: Active Wandb run object, or None to disable TensorBoard logging.
-
+        ent_coef (float | None): Entropy loss coefficient in the PPO objective.
+        batch_size (int): Batch size for PPO updates.
+        n_steps_total (int): Total number of rollout steps per update (before scaling for parallel envs).
+        gamma (float): Discount factor for future rewards.
+        gae_lambda (float): GAE lambda parameter for advantage estimation.
+        lr_decay (bool): Whether to use linear learning rate decay.
+        max_grad_norm (float): Maximum gradient norm for clipping.
+        run (Any): Active Wandb run object, or None to disable TensorBoard logging.
+        hierarchical_high_level (bool): Whether to use a hierarchical high-level policy for sequntial training.
+        n_stacks (int | None): Number of stacks in the yard.
+        n_rows_per_bay (int | None): Number of rows per bay in the yard.
+        joint_hierarchical (bool): Whether to use a joint hierarchical policy.
+        hierarchical_diffobs (bool): Whether to use a differentiated observation hierarchical policy (currently not working).
+        group_num (int | None): Number of container groups in the yard.
     Returns:
         Model : MaskablePPO agent model ready for training.
     """
@@ -265,7 +276,9 @@ def create_model(
     if ent_coef is None:
         ent_coef = 0.15 if (joint_hierarchical or hierarchical_diffobs) else 0.3
 
+    
     if hierarchical_diffobs:
+        # High level and low level policies receive separate observations (does not work currently)
         n_bays = n_stacks // n_rows_per_bay
         bay_f_dim = group_num + 4
         stack_f_dim = 5 * group_num + 5
@@ -283,8 +296,11 @@ def create_model(
             tanh_clipping=tanh_clipping,
         )
     elif joint_hierarchical:
+        # Joint hierarchical policy: separate high-level and low-level policies for bay selection and stack selection.
+        # Same observation is passed to both policies.
         n_bays = n_stacks // n_rows_per_bay
         if use_transformer:
+            # Use Transformer based Pointer Networks
             policy = MaskableJointTransformerPolicy
             policy_kwargs = dict(
                 n_stacks=n_stacks,
@@ -298,6 +314,7 @@ def create_model(
                 **_container_kwargs,
             )
         else:
+            # Use MLP based policy
             policy = MaskableJointMlpPolicy
             policy_kwargs = dict(
                 n_stacks=n_stacks,
@@ -305,6 +322,7 @@ def create_model(
                 n_rows_per_bay=n_rows_per_bay,
                 vf_dim=vf_dim,
             )
+    # Mainly used for sequential hierarchical training.
     elif use_transformer:
         if hierarchical_high_level:
             # Bay-level pointer network for high-level agent
@@ -320,7 +338,7 @@ def create_model(
                 **_container_kwargs,
             )
         else:
-            # Stack-level pointer network (original)
+            # Stack-level pointer network for low-level agent
             policy = MaskableTransformerPolicy
             policy_kwargs = dict(
                 embed_dim=embed_dim,
@@ -338,7 +356,6 @@ def create_model(
 
     # Optional linear LR decay: ramps from `lr` down to 0 over training.
     if lr_decay:
-        from stable_baselines3.common.utils import get_linear_fn
         learning_rate = get_linear_fn(lr, 0.0, 1.0)
     else:
         learning_rate = lr
@@ -384,23 +401,19 @@ def create_callbacks(
     2. Checkpoints: Saved at checkpoint_freq step intervals if save_model_flag=True
     3. Final model: Saved at the end of training if save_model_flag=True
 
-    All models are saved in a subfolder: {save_dir}/{save_filename}/
+    All models are saved in : {save_dir}/{save_filename}/
 
-    The MaskedEvalCallback periodically rolls out the
-    current policy on the evaluation environment and saves the
-    best checkpoint.
 
     Args:
         eval_env: Action-masked evaluation environment.
         eval_freq (int): How often (in environment steps) to run evaluation.
         n_eval_episodes (int): Number of episodes per evaluation run.
-        save_model_flag (bool): Whether to save the model to disk.
+        save_model_flag (bool): Whether to save the model.
         save_dir (str): Directory in which to save model checkpoints.
         save_filename (str): Base filename for the checkpoints (also used for subfolder name).
         max_reward_threshold (float | None): Used during evaluation to
-                 compute the percentage of episodes that achieve perfect episode for given yard.
+                 compute the percentage of episodes that achieve near perfect episode for given yard.
         checkpoint_freq (int): Frequency (in timesteps) for saving model checkpoints.
-                 Default: 1000000 (every 1M steps).
         run: Active W&B run object, or None to skip W&B logging.
 
     Returns:
@@ -425,7 +438,7 @@ def create_callbacks(
 
     callback_list = [eval_callback]
     
-    # Add periodic checkpoint callback
+    # Add periodic checkpoint callback for periodically saving model regardless of evaluation performance.
     if save_model_flag:
         checkpoint_callback = SaveModelCallback(
             save_freq=checkpoint_freq,
@@ -508,12 +521,20 @@ def train(
         n_epochs (int): PPO gradient update epochs per rollout batch.
         lr (float): Learning rate.
         vf_coef (float): Value-function loss coefficient in the PPO objective.
+        ent_coef (float | None): Entropy loss coefficient in the PPO objective.
+        batch_size (int): Batch size for PPO updates.
+        n_steps_total (int): Total rollout steps per update (before scaling for parallel envs).
+        gamma (float): Discount factor for future rewards.
+        gae_lambda (float): GAE lambda parameter for advantage estimation.
+        lr_decay (bool): Whether to use linear learning rate decay.
         run: Active W&B run object, or None to skip W&B logging.
-        hierarchical (bool): Use HierarchicalLowLevelEnv wrapper with a fixed
-            high-level agent for bay selection.
-        high_level_policy_type (str): Policy for the high-level agent
-            ("rule_based_grouped", "rule_based", "random").  Only used
-            when hierarchical=True.
+        hierarchical (bool): Use HierarchicalLowLevelEnv wrapper for serial hierarchical training.
+        high_level_policy_type (str): Fixed Policy for the high-level agent
+            ("rule_based_grouped", "rule_based", "random").  Only used when hierarchical=True for
+            sequential training.
+        hierarchical_high_level (bool), low_level_agent_type (str), low_level_model_path (str | None): Used for sequential hierarchical training.
+        joint_hierarchical (bool): Used for joint hierarchical policy for bay-level and stack-level selection.
+        hierarchical_diffobs (bool): Used for differentiated observation hierarchical policy (currently not working).
     """
     seed = config.get("seed", None)
 

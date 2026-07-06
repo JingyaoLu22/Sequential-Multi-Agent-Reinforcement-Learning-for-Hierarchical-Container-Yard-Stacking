@@ -225,7 +225,7 @@ def make_hierarchical_env(
     rank: int = 0,
 ) -> Callable[[], ActionMasker]:
     """
-    Factory for a single HierarchicalLowLevelEnv instance (parallel-safe).
+    Factory for a single HierarchicalLowLevelEnv instance.
 
     Args:
         config: Environment configuration dict
@@ -287,7 +287,7 @@ def make_high_level_env(
     """
     Factory for a single HierarchicalHighLevelEnv instance (parallel-safe).
 
-    When ``low_level_model_path`` is provided the frozen RL agent is created
+    When low_level_model_path is provided the frozen RL agent is created
     inside the thunk so each subprocess gets its own model copy.
 
     Args:
@@ -377,8 +377,8 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "group_placement": "random",
             "seed": seed,
             "observation_type": "stack_features_v3",
-            "reward_norm": True,
-            "reward_clip": True,
+            "reward_norm": False,
+            "reward_clip": False,
             "stack_fill_penalty": True,
             "container_sizes": True,
             "enable_imo": ENABLE_IMO_CONTAINERS

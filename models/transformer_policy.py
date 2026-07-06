@@ -1,9 +1,8 @@
 """
 Transformer encoder and Pointer Network decoder model.
-The policy architecture is designed for the "stack_features" observation layout without positional embeddings.
 
 Let N be number of stacks in the yard (== num_actions) and F be the number of features per stack.
-include_container_in_encoder controls whether the current-container (one-hot) is included in the encoder input or only used as side context for the decoder and critic.
+include_container_in_encoder controls whether the current-container is included in the encoder input or only used as side context for the decoder and critic.
 B is the batch dimension. D is the embed_dim (hidden dim) for the transformer.
 so the input observation is a flat vector of shape (N*F,). sb3 requires it to be flattened,
 so reshaping it into (B, N, F) is the first step in the features extractor.
@@ -15,7 +14,7 @@ The graph embeddings (GE) and the current_container features are used
 in the PointerDecoder to produce the stack action logits (B, N)
 and in the critic head to produce value estimates (B, vf_dim).
 
-Observation layout (observation_type="stack_features", pos_embeddings=False):
+Observation layout (observation_type="stack_features_v3", pos_embeddings=False):
     flat shape (N*F,)  where
         N = num_stacks = yard_bays * yard_rows  (== num_actions)
         F = 5 * group_num + 5  (features_per_stack)
@@ -182,7 +181,7 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
 class PointerDecoder(nn.Module):
     """
     Attention-Model pointer decoder (Kool et al. 2019), adapted for the stack
-    placement problem.  Runs at every timestep so it is not autoregressive.
+    placement problem.
 
     Given graph embeddings GE (B, N, D) from the encoder and the current-
     container one-hot (B, G), it computes:

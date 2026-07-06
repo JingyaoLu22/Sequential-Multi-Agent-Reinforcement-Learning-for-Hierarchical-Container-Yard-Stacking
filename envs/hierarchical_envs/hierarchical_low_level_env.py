@@ -14,7 +14,7 @@ architecture changes.
 Future use:
     Once the low-level agent is trained, it can be frozen and plugged into
     StackHighLevelEnv to train a high-level Pointer Net.  The constructor
-    also accepts an arbitrary ``high_level_agent`` object so the rule-based
+    also accepts an arbitrary high_level_agent object so the rule-based
     policy can later be swapped for a learned one.
 """
 
@@ -37,17 +37,17 @@ class HierarchicalLowLevelEnv(gym.Env):
     Parameters
     ----------
     config : dict
-        Passed directly to ``StackEnv``.
+        Passed directly to StackEnv.
     high_level_policy_type : str
-        Policy name for the built-in ``HighLevelAgent``
-        (``"rule_based_grouped"`` | ``"rule_based"`` | ``"random"``).
-        Ignored when ``high_level_agent`` is provided.
+        Policy name for the built-in HighLevelAgent
+        ("rule_based_grouped" | "rule_based" | "random").
+        Ignored when high_level_agent is provided.
     high_level_agent : object | None
-        Any object with a ``.get_action(observation, valid_actions) -> int``
+        Any object with a .get_action(observation, valid_actions) -> int
         method that returns a bay number.  When provided, the built-in
-        ``HighLevelAgent`` is not created.
+        HighLevelAgent is not created.
     render_mode : str | None
-        Forwarded to the inner ``StackEnv``.
+        Forwarded to the inner StackEnv.
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -91,7 +91,7 @@ class HierarchicalLowLevelEnv(gym.Env):
 
     def _get_obs_for_high_level(self) -> Dict[str, np.ndarray]:
         """
-        Build the ``flat_parsed`` style dict that ``HighLevelAgent`` expects
+        Build the flat_parsed style dict that HighLevelAgent expects
         directly from the inner env's raw state arrays.
         """
         # yard_state: only odd-bay rows (filter out even-bay padding)
@@ -116,7 +116,7 @@ class HierarchicalLowLevelEnv(gym.Env):
     def _select_bay(self) -> None:
         """
         Run the high-level agent to pick a bay for the current container
-        and store the result in ``self.selected_bay``.
+        and store the result in self.selected_bay.
         """
         valid_actions = self.inner_env._get_valid_yard_actions()
         if len(valid_actions) == 0:
@@ -135,8 +135,8 @@ class HierarchicalLowLevelEnv(gym.Env):
     def action_masks(self) -> List[bool]:
         """
         Return a boolean mask over all actions.  Only stacks inside the
-        high-level's ``selected_bay`` that are also valid (not full) are
-        ``True``.
+        high-level's selected_bay that are also valid (not full) are
+        True.
         """
         if self.inner_env.current_vessel_container is None or self.selected_bay is None:
             return [False] * self.action_space.n

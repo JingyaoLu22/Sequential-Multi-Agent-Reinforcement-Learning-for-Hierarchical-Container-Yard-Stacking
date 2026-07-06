@@ -5,7 +5,7 @@ Wraps StackEnv and embeds a fixed low-level agent (rule-based or frozen RL)
 that selects which stack within a bay to place a container.  The RL agent
 (high-level) selects which bay to place the current container in.
 
-The action space is ``Discrete(num_physical_bays)`` where each action maps
+The action space is Discrete(num_physical_bays) where each action maps
 to an odd bay number.  The observation space is identical to StackEnv.
 Action masks restrict valid actions to bays that have at least one non-full
 stack.
@@ -35,22 +35,22 @@ class HierarchicalHighLevelEnv(gym.Env):
     Parameters
     ----------
     config : dict
-        Passed directly to ``StackEnv``.
+        Passed directly to StackEnv.
     low_level_policy_type : str
-        Policy name for the built-in ``LowLevelAgent``
-        (``"rule_based_grouped"`` | ``"rule_based"`` | ``"random"``).
-        Ignored when ``low_level_agent`` or ``low_level_model_path`` is
+        Policy name for the built-in LowLevelAgent
+        ("rule_based_grouped" | "rule_based" | "random").
+        Ignored when low_level_agent or low_level_model_path is
         provided.
     low_level_agent : object | None
         Any object with a
-        ``.get_action(observation, valid_actions, selected_bay) -> int``
+        .get_action(observation, valid_actions, selected_bay) -> int
         method.  When provided, takes priority.
     low_level_model_path : str | None
         Path to a saved MaskablePPO checkpoint for the low-level agent.
-        When provided (and ``low_level_agent`` is None), a
-        ``FrozenRLLowLevelAgent`` is created.
+        When provided (and low_level_agent is None), a
+        FrozenRLLowLevelAgent is created.
     render_mode : str | None
-        Forwarded to the inner ``StackEnv``.
+        Forwarded to the inner StackEnv.
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -106,7 +106,7 @@ class HierarchicalHighLevelEnv(gym.Env):
 
     def _get_obs_for_low_level(self) -> Dict[str, np.ndarray]:
         """
-        Build the ``flat_parsed`` style dict that rule-based ``LowLevelAgent``
+        Build the flat_parsed style dict that rule-based LowLevelAgent
         expects, directly from the inner env's raw state arrays.
         """
         yard_state = self.inner_env.yard_state
@@ -128,7 +128,7 @@ class HierarchicalHighLevelEnv(gym.Env):
 
     def action_masks(self) -> List[bool]:
         """
-        Return a boolean mask over bay actions.  A bay is valid (``True``)
+        Return a boolean mask over bay actions.  A bay is valid (True)
         if it contains at least one non-full stack.
         """
         if self.inner_env.current_vessel_container is None:
