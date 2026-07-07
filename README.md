@@ -19,16 +19,27 @@ Use `explore.ipynb` to get started and run inference with trained models.
 
 ## Training
 
-Use `run.py` and its parameters to start training models. See the `bash/` folder for sample bash scripts used for training.
+Use `run.py` and its parameters to start training models. Example commands:
 
-## File Overview
+
+For training Hierarchical RL model on small environments with all constraints (40 feet and IMO) on :  
+```
+uv run run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --joint_hierarchical --use_transformer --save_model --save_dir ./models --save_filename ppo_joint_hier_small_imo40ft
+```
+
+For training Flat RL model on small environments with all constraints (40 feet and IMO) on :  
+```
+uv run run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --use_transformer --save_model --save_dir ./models --save_filename ppo_joint_flat_small_imo40ft
+```
+
+## Major Files Overview
 
 | File | Description |
 |---|---|
-| `run.py` | CLI entry point that parses args, builds the env config, and launches training via wandb. |
-| `train.py` | Core training utilities: builds envs/models and runs MaskablePPO training with callbacks. |
+| `run.py` | CLI entry point that parses args, builds the env config, and launches training. |
+| `train.py` | Core training utilities: builds envs/models and runs training with sb3 callbacks. |
 | `utils.py` | Shared helpers: env factories, action-masking, and eval/checkpoint callbacks. |
-| `envs/stack_gym.py` | Gymnasium environment simulating container yard stacking from a vessel. |
-| `agents/hierarchical_rule_based_agent.py` | Rule-based baseline agent for the hierarchical (high/low level) action scheme. |
-| `models/transformer_policy.py` | Transformer encoder + Pointer Network decoder policy for stack selection. |
-| `models/joint_hierarchical_policy.py` | Joint autoregressive policy selecting bay then stack in a single action. |
+| `envs/stack_gym.py` | Gymnasium environment simulating container yard stacking (vessel->yard). |
+| `agents/hierarchical_rule_based_agent.py` | Heuristic baseline agents for yard stacking. |
+| `models/transformer_policy.py` | Transformer encoder and Pointer Network decoder implementation.|
+| `models/joint_hierarchical_policy.py` | Code for Hierarchical RL policy |
