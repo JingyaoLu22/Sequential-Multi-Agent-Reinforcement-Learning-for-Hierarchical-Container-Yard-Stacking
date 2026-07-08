@@ -13,19 +13,6 @@ import os
 
 import numpy as np
 
-# Global toggle for 20ft/40ft container size feature.
-# When True, ~30% of containers are 40ft (rest 20ft) and stacks cannot mix sizes.
-# When False, all containers are treated as 20ft (original behaviour).
-ENABLE_CONTAINER_SIZES = True
-
-# Global toggle for IMO (dangerous) container feature.
-# When True, 50% of container groups are randomly designated as IMO groups,
-# and 25% of containers within those groups are marked as IMO (dangerous).
-# IMO containers of different groups cannot be placed in the same stack or
-# adjacent stacks (explosion risk). When False, no IMO containers exist.
-ENABLE_IMO_CONTAINERS = True
-
-
 class MaskedEvalCallback(BaseCallback):
     """Evaluation callback with action masking support and best-model saving."""
 
@@ -46,7 +33,10 @@ class MaskedEvalCallback(BaseCallback):
         self.n_eval_episodes = n_eval_episodes
         self.save_best_model = save_best_model
         self.save_dir = save_dir
-        self.save_filename = save_filename
+        if save_best_model and save_filename is None:
+            self.save_filename = "best_model"
+        else:
+            self.save_filename = save_filename
         self.max_reward_threshold = max_reward_threshold
         self.best_mean_reward = -np.inf
 
@@ -366,7 +356,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": False,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": False
         }
     elif size == "small_with_margin":
         config = {
@@ -381,7 +371,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": False,
             "stack_fill_penalty": True,
             "container_sizes": True,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": True
         }
     elif size == "medium":
         config = {
@@ -396,7 +386,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": False,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": False
         }
     elif size == "large":
         config = {
@@ -411,7 +401,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": False,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": False
         }
     elif size == "large_v2":
         config = {
@@ -426,7 +416,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": False,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": False
         }
     elif size == "large_v3":
         config = {
@@ -441,7 +431,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": False,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": False
         }
     elif size == "large_v4":
         config = {
@@ -456,7 +446,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": False,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": False
         }
     elif size == "medium_with_margin":
         config = {
@@ -471,7 +461,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": True,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": True
         }
     elif size == "large_with_margin":
         config = {
@@ -486,7 +476,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": True,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": True
         }
     elif size == "large_v2_with_margin":
         config = {
@@ -501,7 +491,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": True,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": True
         }
     elif size == "large_v3_with_margin":
         config = {
@@ -516,7 +506,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": True,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": True
         }
     elif size == "large_v4_with_margin":
         config = {
@@ -531,7 +521,7 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": True,
-            "enable_imo": ENABLE_IMO_CONTAINERS
+            "enable_imo": True
         }
     else:
         raise ValueError("Invalid size. Choose 'small', 'small_with_margin', 'medium', 'medium_with_margin', 'large', 'large_with_margin', 'large_v2', 'large_v2_with_margin', 'large_v3', 'large_v3_with_margin', 'large_v4', or 'large_v4_with_margin'.")
