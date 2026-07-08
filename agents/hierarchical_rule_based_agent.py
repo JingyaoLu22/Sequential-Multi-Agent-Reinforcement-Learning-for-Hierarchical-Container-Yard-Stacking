@@ -24,13 +24,24 @@ class BaseAgent(ABC):
     def get_action(self, observation: dict, valid_actions: np.ndarray) -> int:
         """
         Return action from agent based on observation
+        
+        Args:
+            observation: Environment observation (dict or flattened array)
+            valid_actions: Array of valid action indices
+            
+        Returns:
+            Selected action index or None if no valid action
         """
         pass
 
     @abstractmethod
     def update_agent(self, reward: float) -> None:
         """
-        Update agent based on feedback (may need later for RL agents)
+        Update agent based on feedback
+        
+        Args:
+            reward: Reward signal from environment
+            info: Additional information dictionary
         """
         pass
 
