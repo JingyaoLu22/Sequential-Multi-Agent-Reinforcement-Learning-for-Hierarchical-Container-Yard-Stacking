@@ -279,6 +279,8 @@ def create_model(
     
     if hierarchical_diffobs:
         # High level and low level policies receive separate observations (does not work currently)
+        if n_stacks is None or n_rows_per_bay is None or group_num is None:
+            raise ValueError("hierarchical_diffobs=True requires n_stacks, n_rows_per_bay, and group_num")
         n_bays = n_stacks // n_rows_per_bay
         bay_f_dim = group_num + 4
         stack_f_dim = 5 * group_num + 5
