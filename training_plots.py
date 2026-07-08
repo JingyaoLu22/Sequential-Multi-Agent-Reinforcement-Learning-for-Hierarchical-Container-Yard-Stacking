@@ -70,8 +70,8 @@ def _fetch_cached(
     cache_path = os.path.join(cache_dir, name.replace("/", "_") + ".npz")
     if os.path.exists(cache_path):
         print(f"  {name}  [from cache]")
-        data = np.load(cache_path)
-        return data["steps"], data["rewards"]
+        with np.load(cache_path) as data:
+            return data["steps"], data["rewards"]
     print(f"  {name}  [fetching from wandb …]")
     steps, rewards = _fetch(api, run_map, name)
     np.savez(cache_path, steps=steps, rewards=rewards)
