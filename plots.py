@@ -338,36 +338,6 @@ def plot_kde(num_seeds, title_env_label="Environment", results_dir="results"):
             zorder=5,
         )
 
-    # Second pass: place median labels with staggered heights to avoid overlap
-    medians.sort(key=lambda t: t[0])  # sort by median value
-    ymax = ax.get_ylim()[1]
-    y_positions = [0.92, 0.72, 0.52]  # staggered y-fractions
-    # If two medians are very close, they get different heights;
-    # otherwise they can share the top position
-    x_range = x_max - x_min if x_max > x_min else 1.0
-    min_gap = 0.03 * x_range  # 3% of x-range considered "too close"
-
-    assigned_y = []
-    for i, (median, name) in enumerate(medians):
-        # Check distance to all previously placed labels
-        y_frac = y_positions[0]
-        for prev_med, prev_y in assigned_y:
-            if abs(median - prev_med) < min_gap:
-                # Pick next available height that isn't taken
-                for candidate in y_positions:
-                    conflict = False
-                    for pm, py in assigned_y:
-                        if abs(median - pm) < min_gap and abs(candidate - py) < 0.15:
-                            conflict = True
-                            break
-                    if not conflict:
-                        y_frac = candidate
-                        break
-                break
-        assigned_y.append((median, y_frac))
-
-        
-
     ax.set_xlabel("Final episode reward")
     ax.set_ylabel("Density")
     ax.set_title(title_env_label, fontsize=18, fontweight="bold")
