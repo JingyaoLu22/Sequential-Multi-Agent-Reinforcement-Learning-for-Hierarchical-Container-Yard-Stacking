@@ -11,6 +11,7 @@ Maskable PPO. The functions used are :
 """
 
 from __future__ import annotations
+import os
 from typing import Any
 from sb3_contrib.ppo_mask import MaskablePPO
 from envs.stack_gym import StackEnv
@@ -71,10 +72,30 @@ def create_env(
         parallel (bool): If True, create a parallelized training env.
         n_parallel_envs (int): Number of parallel worker processes when
             parallel=True.  Ignored when parallel=False.
-        hierarchical (bool): Wrap envs with HierarchicalLowLevelEnv.
+        hierarchical (bool): Wrap envs with HierarchicalLowLevelEnv, using a
+            fixed high-level bay-selection agent while the RL agent learns
+            only the low-level stack selection.
         high_level_policy_type (str): Policy for the high-level agent
             ("rule_based_grouped", "rule_based", "random").  Only used
             when hierarchical=True.
+        hierarchical_high_level (bool): Wrap envs with HierarchicalHighLevelEnv,
+            using a fixed (or trained) low-level stack-selection agent while
+            the RL agent learns only the high-level bay selection.
+        low_level_agent_type (str): Policy for the low-level agent when
+            hierarchical_high_level=True ("rule_based_grouped", "rule_based",
+            "random", "trained_model"). If "trained_model", low_level_model_path
+            must be provided; otherwise falls back to "rule_based_grouped".
+        low_level_model_path (str | None): Path to a trained low-level policy
+            model, used when hierarchical_high_level=True and
+            low_level_agent_type="trained_model".
+        joint_hierarchical (bool): Use plain StackEnv instances but signal
+            that training uses separate joint high-level/low-level policy
+            networks (bay selection and stack selection).
+        hierarchical_diffobs (bool): Differentiated-observation hierarchical
+            mode, where the bay head sees bay-level features and the stack
+            head sees per-bay stack features. Sets
+            config["observation_type"] = "hierarchical_diff_obs" on both the
+            training and evaluation configs.
 
     Returns:
         tuple with training environment and evaluation environment.
@@ -116,6 +137,14 @@ def create_env(
 
     elif hierarchical_high_level:
         # For sequential Hierarchical Training where one-level is fixed while the other is trained.
+        if low_level_agent_type == "trained_model" and (
+            not low_level_model_path or not os.path.isfile(low_level_model_path)
+        ):
+            raise ValueError(
+                "low_level_agent_type='trained_model' requires low_level_model_path "
+                f"to point to an existing model file, got {low_level_model_path!r}."
+            )
+
         ll_model_path = low_level_model_path if low_level_agent_type == "trained_model" else None
         ll_policy_type = low_level_agent_type if low_level_agent_type != "trained_model" else "rule_based_grouped"
 
