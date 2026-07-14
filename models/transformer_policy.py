@@ -99,7 +99,7 @@ class TransformerFeaturesExtractor(BaseFeaturesExtractor):
         embed_dim: int = 128,
         n_heads: int = 4,
         n_layers: int = 2,
-        dropout: float = 0.1,
+        dropout: float = 0,
         include_container_in_encoder: bool = True,
         container_start: int | None = None,
         container_dim: int | None = None,
