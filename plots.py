@@ -30,6 +30,7 @@ def _evaluate_rule_based(config_dict, policy_type, num_seeds, max_steps):
         )
         observation, info = env.reset(seed=seed)
         total_reward = 0.0
+        episode_terminated = False
         for _ in range(max_steps):
             valid_actions = env._get_valid_yard_actions()
             if len(valid_actions) == 0:
@@ -43,8 +44,10 @@ def _evaluate_rule_based(config_dict, policy_type, num_seeds, max_steps):
             observation, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
             if terminated or truncated:
+                episode_terminated = True
                 break
-        all_rewards.append(total_reward)
+        if episode_terminated:
+            all_rewards.append(total_reward)
         env.close()
         if (seed + 1) % 20 == 0:
             print(f"  Completed {seed + 1}/{num_seeds} seeds...")
