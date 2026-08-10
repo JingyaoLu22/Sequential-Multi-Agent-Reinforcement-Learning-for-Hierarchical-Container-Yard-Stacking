@@ -770,8 +770,8 @@ if __name__ == "__main__":
         "random_group_sizes": True,
     }
 
-    FLAT_MODEL_DIR = "models/flat/pointer/large4"
-    HRL_MODEL_DIR = "models/hierarchical/pointer/large4"
+    FLAT_MODEL_DIR = "stack/models/flat/pointer/large4"
+    HRL_MODEL_DIR = "stack/models/hierarchical/pointer/large4"
     NUM_SEEDS = 100
     MAX_STEPS = 500
     FLAT_SEED = 2   # which seed (1-3) to use for flat RL

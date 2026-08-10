@@ -1,3 +1,12 @@
+"""
+run.py
+
+CLI entry point for the Stack pipeline — container-yard-stacking
+(hierarchical RL with pointer networks). Not related to the Stow
+(vessel stowage-planning) code under `stow/`, which is trained via
+`stow/train_spge.py` instead.
+"""
+
 import argparse
 
 import wandb

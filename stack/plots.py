@@ -120,10 +120,10 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
         rule-based agents; RL models will get "stack_features_v3" automatically).
     flat_model_dir : str
         Base path containing seed1/, seed2/, seed3/ for flat RL models,
-        e.g. "models/flat/pointer/small".
+        e.g. "stack/models/flat/pointer/small".
     hrl_model_dir : str
         Base path containing seed1/, seed2/, seed3/ for hierarchical RL models,
-        e.g. "models/hierarchical/pointer/small".
+        e.g. "stack/models/hierarchical/pointer/small".
     num_seeds : int
         Number of environment seeds to evaluate per model.
     max_steps : int
@@ -376,8 +376,8 @@ if __name__ == "__main__":
         "random_group_sizes": True,
     }
 
-    FLAT_MODEL_DIR = "models/flat/pointer/large4"
-    HRL_MODEL_DIR = "models/hierarchical/pointer/large4"
+    FLAT_MODEL_DIR = "stack/models/flat/pointer/large4"
+    HRL_MODEL_DIR = "stack/models/hierarchical/pointer/large4"
     NUM_SEEDS = 100
     MAX_STEPS = 500
     THRESHOLD = 3800

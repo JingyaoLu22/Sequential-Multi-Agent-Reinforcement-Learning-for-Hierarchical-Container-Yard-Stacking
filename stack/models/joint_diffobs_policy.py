@@ -1,6 +1,7 @@
 """
 Differentiated-Observation Joint Hierarchical Policy.
-(RL TRAINING NOT WORKING CURRENTLY. This is a work-in-progress.)
+(Work-in-progress: training converges to a policy clearly better than
+random, but has not been observed to reach optimal stacking solutions.)
 
 Implements an autoregressive policy where the bay head and stack head
 receive different observation features:
