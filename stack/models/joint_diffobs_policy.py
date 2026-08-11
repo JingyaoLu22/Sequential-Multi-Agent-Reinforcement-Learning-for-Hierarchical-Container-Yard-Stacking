@@ -1,7 +1,7 @@
 """
 Differentiated-Observation Joint Hierarchical Policy.
-(Work-in-progress: training converges to a policy clearly better than
-random, but has not been observed to reach optimal stacking solutions.)
+Training converges to a policy clearly better than
+random, but has not been observed to reach optimal stacking solutions.
 
 Implements an autoregressive policy where the bay head and stack head
 receive different observation features:
@@ -15,7 +15,7 @@ is laid out as[bay_features.flatten() | stack_features.flatten()].
 The action space remainsDiscrete(n_stacks) for MaskablePPO compatibility.
 The global action encodes bay_idx * n_rows_per_bay + local_stack_idx.
 
-Critic (Option B — joint): mean-pool(bay_encoder) + mean-pool(stack_encoder)
+Critic : mean-pool(bay_encoder) + mean-pool(stack_encoder)
   + proj(container_feats)  →  MLP  →  (B, vf_dim)
 
 Architecture

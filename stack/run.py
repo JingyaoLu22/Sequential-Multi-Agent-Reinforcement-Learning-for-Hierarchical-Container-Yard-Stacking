@@ -301,7 +301,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--hierarchical_diffobs",
         action="store_true",
-        help="Train with differentiated observations: bay head sees bay-level features, stack head sees per-bay stack features.",
+        help="Train with differentiated observations: bay head sees bay-level features, stack head sees per-bay stack features. Only learns suboptimal policy.",
     )
     parser.add_argument(
         "--random_group_sizes",

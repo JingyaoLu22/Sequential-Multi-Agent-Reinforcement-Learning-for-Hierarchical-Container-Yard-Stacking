@@ -109,7 +109,7 @@ def create_env(
     if hierarchical_diffobs:
         # Differentiated-observation hierarchical: bay head sees bay-level
         # features, stack head sees per-bay stack features.
-        # Learning does not work for this setting currently (Need to explore further)
+        # Learns suboptimal policy.
         config["observation_type"] = "hierarchical_diff_obs"
         eval_config["observation_type"] = "hierarchical_diff_obs"
         if parallel:
