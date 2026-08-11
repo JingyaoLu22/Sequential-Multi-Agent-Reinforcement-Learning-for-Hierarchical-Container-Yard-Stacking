@@ -24,7 +24,7 @@ After downloading move the flat and hierarchical folders inside the already exis
 
 ### Getting Started
 
-Use `stack/notebooks/explore.ipynb` to get started and run inference with trained models.
+Use `stack/explore.ipynb` to get started and run inference with trained models.
 
 ### Training
 
