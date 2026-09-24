@@ -1,0 +1,8 @@
+.git
+.idea
+__pycache__
+*.pyc
+models_trained
+evaluation_results
+*.ipynb
+comand line.txt
