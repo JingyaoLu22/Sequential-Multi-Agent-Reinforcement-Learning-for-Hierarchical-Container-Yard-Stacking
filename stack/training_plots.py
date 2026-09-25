@@ -1,19 +1,22 @@
 """
 training_plots.py
 -----------------
-Plot training curves for flat and hierarchical RL seeds fetched from wandb.
+Plot evaluation-reward training curves for flat and hierarchical RL
+seeds, fetched from wandb (plot_training_curves) or read from local
+evaluations.csv files (plot_csv_training_curves).
 
 Usage (script):
-    python training_plots.py
+    python training_plots.py                      # the W&B example below
+    python -m stack.training_plots --hrl_dirs runs/s1 runs/s2 runs/s3 \
+        --display_name "Small (3x4x3)" --save_path runs/training_curves_3seeds
 """
 
+import csv
 import os
-import wandb
+from pathlib import Path
+from typing import List, Optional, Sequence
+
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
-from typing import List, Optional
 
 ENTITY  = "aritrabancode-university-of-amsterdam"
 PROJECT = "stack-rl"
@@ -21,6 +24,18 @@ PROJECT = "stack-rl"
 # Colors matching plots.py
 FLAT_COLOR = "#59A14F"
 HRL_COLOR  = "#F28E2B"
+
+PLOT_STYLE = {
+    "font.family":        "serif",
+    "font.size":          11,
+    "axes.labelsize":     12,
+    "axes.titlesize":     18,
+    "legend.fontsize":    10,
+    "xtick.labelsize":    10,
+    "ytick.labelsize":    10,
+    "axes.spines.top":    False,
+    "axes.spines.right":  False,
+}
 
 
 # ============================================================
@@ -42,8 +57,10 @@ def _ema(values: np.ndarray, alpha: float) -> np.ndarray:
     return out
 
 
-def _fetch(api: wandb.Api, run_map: dict, name: str):
+def _fetch(api, run_map: dict, name: str):
     """Return (steps, rewards) numpy arrays for a single wandb run."""
+    import pandas as pd
+
     if name not in run_map:
         raise KeyError(
             f"Run '{name}' not found in {ENTITY}/{PROJECT}.\n"
@@ -57,7 +74,7 @@ def _fetch(api: wandb.Api, run_map: dict, name: str):
 
 
 def _fetch_cached(
-    api: wandb.Api,
+    api,
     run_map: dict,
     name: str,
     cache_dir: str,
@@ -79,6 +96,24 @@ def _fetch_cached(
     return steps, rewards
 
 
+def load_csv_curve(source):
+    """
+    Return (steps, rewards) from an evaluations.csv, or from a run
+    directory containing training_logs/evaluations.csv.
+    """
+    path = Path(source)
+    if path.is_dir():
+        path = path / "training_logs" / "evaluations.csv"
+    with path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    if not rows:
+        raise ValueError(f"{path} has no evaluation records yet.")
+    steps = np.array([float(row["timesteps"]) for row in rows])
+    rewards = np.array([float(row["mean_reward"]) for row in rows])
+    order = np.argsort(steps, kind="stable")
+    return steps[order], rewards[order]
+
+
 def _to_common_grid(
     steps_list: List[np.ndarray],
     rewards_list: List[np.ndarray],
@@ -96,22 +131,92 @@ def _to_common_grid(
     if hi is None:
         hi = min(s[-1] for s in steps_list)
     grid = np.linspace(lo, hi, n_points)
+    return grid, np.array([np.interp(grid, s, r) for s, r in zip(steps_list, rewards_list)])
 
-    rows = []
-    for steps, rewards in zip(steps_list, rewards_list):
-        f = interp1d(
-            steps, rewards,
-            kind="linear",
-            bounds_error=False,
-            fill_value=(rewards[0], rewards[-1]),
-        )
-        rows.append(f(grid))
 
-    return grid, np.array(rows)  # (n_seeds, n_points)
+def _plot_groups(
+    groups,
+    title: str,
+    ema_alpha: float,
+    n_points: int,
+    save_path,
+    show: bool,
+):
+    """
+    groups: [(label, color, [(steps, rewards), ...]), ...]. All curves are
+    clipped to the step range every seed of every group covers.
+    """
+    import matplotlib as mpl
+    from matplotlib.figure import Figure
+    from matplotlib.ticker import FuncFormatter
+
+    curves = [curve for _label, _color, group in groups for curve in group]
+    global_lo = max(s[0]  for s, _ in curves)
+    global_hi = min(s[-1] for s, _ in curves)
+    if global_lo > global_hi:
+        raise ValueError("The seed histories have no common training-step interval.")
+
+    with mpl.rc_context(PLOT_STYLE):
+        if show:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(9, 5))
+        else:
+            # No pyplot: safe to call repeatedly during headless training.
+            fig = Figure(figsize=(9, 5))
+            ax = fig.subplots()
+
+        # A new run may have only its first evaluation: show it as a point.
+        marker = "o" if global_lo == global_hi else None
+
+        for label, color, group in groups:
+            grid, matrix = _to_common_grid(
+                [s for s, _ in group], [r for _, r in group], n_points, lo=global_lo, hi=global_hi
+            )
+
+            # Raw seed lines — faint to show actual fluctuations
+            for curve in matrix:
+                ax.plot(grid, curve, color=color, alpha=0.35, linewidth=1.2, marker=marker)
+
+            # EMA line per seed — one bold line each, same color
+            for i, curve in enumerate(matrix):
+                ax.plot(
+                    grid, _ema(curve, alpha=ema_alpha),
+                    color=color, linewidth=2.0, alpha=0.85, marker=marker,
+                    label=label if i == 0 else "_nolegend_",
+                )
+
+        # Format x-axis ticks as "0.2M", "1M", "5M" etc.
+        def _millions_fmt(x, _pos):
+            m = x / 1_000_000
+            if m == int(m):
+                return f"{int(m)}M"
+            # strip trailing zeros (e.g. 0.50 → "0.5M")
+            return f"{m:.2g}M"
+
+        ax.xaxis.set_major_formatter(FuncFormatter(_millions_fmt))
+
+        ax.set_xlabel("Training Steps (millions)")
+        ax.set_ylabel("Eval Mean Reward")
+        ax.set_title(title, fontsize=18, fontweight="bold")
+        ax.legend(frameon=False)
+        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4)
+        fig.tight_layout()
+
+        if save_path:
+            base = str(save_path).rstrip("/\\")
+            os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
+            fig.savefig(base + ".pdf", bbox_inches="tight")
+            fig.savefig(base + ".png", dpi=300, bbox_inches="tight")
+            print(f"\nSaved: {base}.pdf / .png")
+
+        if show:
+            plt.show()
+
+    return fig, ax
 
 
 # ============================================================
-# MAIN PLOT FUNCTION
+# MAIN PLOT FUNCTIONS
 # ============================================================
 
 def plot_training_curves(
@@ -156,9 +261,9 @@ def plot_training_curves(
         Useful when wandb logged steps are in "update" units and you
         want to convert to environment steps.
     """
+    import wandb
+
     label = display_name if display_name is not None else env_name
-    if title is None:
-        title = label
     if save_path is None:
         save_path = os.path.join("results", "training_curves", env_name, "training_curves")
 
@@ -170,101 +275,52 @@ def plot_training_curves(
     runs_iter = api.runs(f"{ENTITY}/{PROJECT}")
     run_map   = {r.name: r.id for r in runs_iter}
 
-    groups = [
+    STEP_MULTIPLIER = 197 if step_correction else 1
+
+    groups = []
+    for group_label, run_names, color in [
         ("Flat RL",           flat_run_names, FLAT_COLOR),
         ("Hierarchical RL",   hrl_run_names,  HRL_COLOR),
+    ]:
+        print(f"\nFetching {group_label} runs …")
+        curves = []
+        for name in run_names:
+            steps, rewards = _fetch_cached(api, run_map, name, cache_dir)
+            curves.append((steps * STEP_MULTIPLIER, rewards))
+        groups.append((group_label, color, curves))
+
+    return _plot_groups(groups, title or label, ema_alpha, n_points, save_path, show=True)
+
+
+def plot_csv_training_curves(
+    hrl_run_dirs: Sequence,
+    flat_run_dirs: Sequence = (),
+    env_name: str = "env",
+    display_name: Optional[str] = None,
+    ema_alpha: float = 0.1,
+    n_points: int = 500,
+    title: Optional[str] = None,
+    save_path: Optional[str] = None,
+    show: bool = False,
+):
+    """
+    Same plot as plot_training_curves(), from local runs: each entry is a
+    run directory (with training_logs/evaluations.csv) or a CSV path.
+    """
+    label = display_name if display_name is not None else env_name
+    if save_path is None:
+        save_path = os.path.join("results", "training_curves", env_name, "training_curves")
+
+    groups = [
+        (group_label, color, [load_csv_curve(source) for source in sources])
+        for group_label, sources, color in [
+            ("Flat RL",           flat_run_dirs, FLAT_COLOR),
+            ("Hierarchical RL",   hrl_run_dirs,  HRL_COLOR),
+        ]
+        if sources
     ]
 
-    plt.rcParams.update({
-        "font.family":        "serif",
-        "font.size":          11,
-        "axes.labelsize":     12,
-        "axes.titlesize":     18,
-        "legend.fontsize":    10,
-        "xtick.labelsize":    10,
-        "ytick.labelsize":    10,
-        "axes.spines.top":    False,
-        "axes.spines.right":  False,
-    })
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-
-    # ── Fetch all runs first to compute a global step range ──
-    all_steps_lists, all_rewards_lists = [], []
-    for label, run_names, color in groups:
-        print(f"\nFetching {label} runs …")
-        steps_list, rewards_list = [], []
-        for name in run_names:
-            s, r = _fetch_cached(api, run_map, name, cache_dir)
-            steps_list.append(s)
-            rewards_list.append(r)
-        all_steps_lists.append(steps_list)
-        all_rewards_lists.append(rewards_list)
-
-    # Global range: clip all curves to the shortest run across both groups
-    global_lo = max(s[0]  for sl in all_steps_lists for s in sl)
-    global_hi = min(s[-1] for sl in all_steps_lists for s in sl)
-
-    # Apply step correction (multiply x-axis by 197) if requested
-    STEP_MULTIPLIER = 197
-    if step_correction:
-        all_steps_lists = [
-            [s * STEP_MULTIPLIER for s in sl] for sl in all_steps_lists
-        ]
-        global_lo *= STEP_MULTIPLIER
-        global_hi *= STEP_MULTIPLIER
-
-    print(f"\nGlobal step range: {global_lo:.0f} – {global_hi:.0f}")
-
-    for (label, run_names, color), steps_list, rewards_list in zip(
-        groups, all_steps_lists, all_rewards_lists
-    ):
-        grid, matrix = _to_common_grid(
-            steps_list, rewards_list, n_points, lo=global_lo, hi=global_hi
-        )
-
-        # Raw seed lines — faint to show actual fluctuations
-        for curve in matrix:
-            ax.plot(
-                grid, curve,
-                color=color, alpha=0.35, linewidth=1.2,
-            )
-
-        # EMA line per seed — one bold line each, same color
-        for i, curve in enumerate(matrix):
-            smooth = _ema(curve, alpha=ema_alpha)
-            ax.plot(
-                grid, smooth,
-                color=color, linewidth=2.0, alpha=0.85,
-                label=label if i == 0 else "_nolegend_",
-            )
-
-    # Format x-axis ticks as "0.2M", "1M", "5M" etc.
-    def _millions_fmt(x, _pos):
-        m = x / 1_000_000
-        if m == int(m):
-            return f"{int(m)}M"
-        # strip trailing zeros (e.g. 0.50 → "0.5M")
-        return f"{m:.2g}M"
-
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(_millions_fmt))
-
-    ax.set_xlabel("Training Steps (millions)")
-    ax.set_ylabel("Eval Mean Reward")
-    ax.set_title(title, fontsize=18, fontweight="bold")
-    ax.legend(frameon=False)
-    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.4)
-    fig.tight_layout()
-
-    if save_path:
-        base = save_path.rstrip("/\\")
-        os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
-        fig.savefig(base + ".pdf", bbox_inches="tight")
-        fig.savefig(base + ".png", dpi=300, bbox_inches="tight")
-        print(f"\nSaved: {base}.pdf / .png")
-
-    plt.show()
-    return fig, ax
+    return _plot_groups(groups, title or label, ema_alpha, n_points, save_path, show)
 
 
 # ============================================================
@@ -272,22 +328,48 @@ def plot_training_curves(
 # ============================================================
 
 if __name__ == "__main__":
-    FLAT_RUNS = [
-        "flat-pointer-small-1M-s1",
-        "flat-pointer-small-1M-s2",
-        "flat-pointer-small-1M-s3"
-    ]
-    HRL_RUNS = [
-        "hrl-pointer-small-1M-s1",
-        "hrl-pointer-small-1M-s2",
-        "hrl-pointer-small-1M-s3"
-    ]
+    import argparse
 
-    plot_training_curves(
-        flat_run_names=FLAT_RUNS,
-        hrl_run_names=HRL_RUNS,
-        env_name="small",
-        display_name="Small (3x4x3)",
-        ema_alpha=0.1,
-        step_correction=True
+    parser = argparse.ArgumentParser(
+        description="Plot seed runs from their local evaluations.csv; "
+                    "without run directories, plot the W&B example below."
     )
+    parser.add_argument("--hrl_dirs", nargs="+", default=[],
+                        help="Hierarchical / Sequential HPPO run directories, one per seed.")
+    parser.add_argument("--flat_dirs", nargs="+", default=[],
+                        help="Flat RL run directories, one per seed.")
+    parser.add_argument("--display_name")
+    parser.add_argument("--save_path", help="Output base path without extension.")
+    parser.add_argument("--ema_alpha", type=float, default=0.1)
+    parser.add_argument("--plot_points", type=int, default=500)
+    args = parser.parse_args()
+
+    if args.hrl_dirs or args.flat_dirs:
+        plot_csv_training_curves(
+            args.hrl_dirs,
+            args.flat_dirs,
+            display_name=args.display_name,
+            ema_alpha=args.ema_alpha,
+            n_points=args.plot_points,
+            save_path=args.save_path,
+        )
+    else:
+        FLAT_RUNS = [
+            "flat-pointer-small-1M-s1",
+            "flat-pointer-small-1M-s2",
+            "flat-pointer-small-1M-s3"
+        ]
+        HRL_RUNS = [
+            "hrl-pointer-small-1M-s1",
+            "hrl-pointer-small-1M-s2",
+            "hrl-pointer-small-1M-s3"
+        ]
+
+        plot_training_curves(
+            flat_run_names=FLAT_RUNS,
+            hrl_run_names=HRL_RUNS,
+            env_name="small",
+            display_name="Small (3x4x3)",
+            ema_alpha=0.1,
+            step_correction=True
+        )

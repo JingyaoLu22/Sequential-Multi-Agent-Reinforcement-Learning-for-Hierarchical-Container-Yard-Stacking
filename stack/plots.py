@@ -1,16 +1,26 @@
 import os
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 from scipy.stats import gaussian_kde
 
-from envs.stack_gym import StackEnv
-from agents.hierarchical_rule_based_agent import HierarchicalAgent
+from .envs.stack_gym import StackEnv
+from .agents.hierarchical_rule_based_agent import HierarchicalAgent
 
 from sb3_contrib.ppo_mask import MaskablePPO
 from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.common.wrappers import ActionMasker
-from utils import mask_fn
-from models.joint_hierarchical_policy import MaskableJointTransformerPolicy
+from .utils import mask_fn
+from .configs.device import get_device
+from .models.transformer_policy import MaskableTransformerPolicy
+from .models.joint_hierarchical_policy import MaskableJointTransformerPolicy
+from .evaluation.evaluate import (
+    build_evaluation_system,
+    evaluate_policy,
+    load_checkpoint_config,
+)
 
 
 # ============================================================
@@ -80,6 +90,30 @@ def _evaluate_rl_model(config_dict, model, num_seeds, max_steps):
     return all_rewards
 
 
+def _evaluate_sequential_hppo(config_dict, run_dir, num_seeds):
+    """Deterministic Sequential HPPO episodes on seeds 0..num_seeds-1,
+    i.e. the same env.reset(seed=seed) episodes as every other agent."""
+    run_dir = Path(run_dir)
+    _, algorithm_config = load_checkpoint_config(run_dir / "best_config.json")
+    bay_actor, row_actor = build_evaluation_system(
+        environment_config=config_dict,
+        algorithm_config=algorithm_config,
+        agent_b_path=run_dir / "best_agent_b.pt",
+        agent_r_path=run_dir / "best_agent_r.pt",
+        device=torch.device(get_device()),
+    )
+    episodes, _ = evaluate_policy(
+        environment_config=config_dict,
+        bay_actor=bay_actor,
+        row_actor=row_actor,
+        n_episodes=num_seeds,
+        base_seed=0,
+        deterministic=True,
+        verbose=False,
+    )
+    return [episode.total_reward for episode in episodes]
+
+
 def _compute_stats(name, rewards, num_seeds, threshold):
     rewards = np.array(rewards)
     mean_r = np.mean(rewards)
@@ -104,14 +138,16 @@ def _compute_stats(name, rewards, num_seeds, threshold):
 
 
 # ============================================================
-# MAIN EVALUATE FUNCTION — 9 models
-#   3 rule-based (random, rule_based, rule_based_grouped)
-#   3 flat RL    (seed1, seed2, seed3)
-#   3 HRL        (seed1, seed2, seed3)
+# MAIN EVALUATE FUNCTION — 9 models, or 12 with Sequential HPPO
+#   3 rule-based     (random, rule_based, rule_based_grouped)
+#   3 flat RL        (seed1, seed2, seed3)
+#   3 HRL            (seed1, seed2, seed3)
+#   3 Sequential HPPO (s1, s2, s3), optional
 # ============================================================
 
 def evaluate(config_dict, flat_model_dir, hrl_model_dir,
-             num_seeds=100, max_steps=500, threshold=90):
+             num_seeds=100, max_steps=500, threshold=90,
+             sequential_model_dir=None):
     """
     Parameters
     ----------
@@ -130,6 +166,10 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
         Max steps per episode.
     threshold : float
         Reward threshold for computing "% seeds > threshold".
+    sequential_model_dir : str or None
+        Base path containing the s1/, s2/, s3/ Sequential HPPO runs (each a
+        run_sequential_hppo --save_dir), e.g. "models_trained/sequential_hppo_small".
+        Each run's best_agent_b.pt / best_agent_r.pt are evaluated.
     """
     # Derive size label from model dir (e.g. "small", "medium", "large1")
     size_label = os.path.basename(os.path.normpath(flat_model_dir))
@@ -137,9 +177,10 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
     os.makedirs(results_dir, exist_ok=True)
     all_stats = []
     model_num = 0
+    n_models = 9 if sequential_model_dir is None else 12
 
     print(f"\n{'#' * 70}")
-    print(f"STARTING EVALUATION — 9 models x {num_seeds} seeds each")
+    print(f"STARTING EVALUATION — {n_models} models x {num_seeds} seeds each")
     print(f"{'#' * 70}")
 
     # ── 1. Rule-based agents (random, rule_based, rule_based_grouped) ──
@@ -153,11 +194,11 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
         model_num += 1
         npy_path = os.path.join(results_dir, f"{name}_rewards.npy")
         if os.path.exists(npy_path):
-            print(f"\n[{model_num}/9] LOADING {name.upper()} from existing {npy_path}")
+            print(f"\n[{model_num}/{n_models}] LOADING {name.upper()} from existing {npy_path}")
             rewards = np.load(npy_path)
         else:
             print(f"\n{'=' * 70}")
-            print(f"[{model_num}/9] EVALUATING {name.upper()} AGENT ACROSS {num_seeds} SEEDS")
+            print(f"[{model_num}/{n_models}] EVALUATING {name.upper()} AGENT ACROSS {num_seeds} SEEDS")
             print(f"{'=' * 70}")
             rewards = _evaluate_rule_based(config_dict, policy_type, num_seeds, max_steps)
             np.save(npy_path, np.array(rewards))
@@ -180,17 +221,22 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
         model_num += 1
         npy_path = os.path.join(results_dir, f"{name}_rewards.npy")
         if os.path.exists(npy_path):
-            print(f"\n[{model_num}/9] LOADING FLAT RL ({seed_dir.upper()}) from existing {npy_path}")
+            print(f"\n[{model_num}/{n_models}] LOADING FLAT RL ({seed_dir.upper()}) from existing {npy_path}")
             rewards = np.load(npy_path)
         else:
             if not os.path.exists(model_path + ".zip"):
-                print(f"\n[{model_num}/9] SKIPPING FLAT RL ({seed_dir.upper()}) — model not found: {model_path}")
+                print(f"\n[{model_num}/{n_models}] SKIPPING FLAT RL ({seed_dir.upper()}) — model not found: {model_path}")
                 continue
             print(f"\n{'=' * 70}")
-            print(f"[{model_num}/9] EVALUATING FLAT RL ({seed_dir.upper()}) ACROSS {num_seeds} SEEDS")
+            print(f"[{model_num}/{n_models}] EVALUATING FLAT RL ({seed_dir.upper()}) ACROSS {num_seeds} SEEDS")
             print(f"  Loading model: {model_path}")
             print(f"{'=' * 70}")
-            model = MaskablePPO.load(model_path)
+            # The saved policy_class path ("models.transformer_policy...")
+            # predates the stack package, so pass the class explicitly.
+            model = MaskablePPO.load(
+                model_path,
+                custom_objects={"policy_class": MaskableTransformerPolicy},
+            )
             print(f"  Model loaded successfully.")
             rewards = _evaluate_rl_model(rl_config, model, num_seeds, max_steps)
             np.save(npy_path, np.array(rewards))
@@ -209,14 +255,14 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
         model_num += 1
         npy_path = os.path.join(results_dir, f"{name}_rewards.npy")
         if os.path.exists(npy_path):
-            print(f"\n[{model_num}/9] LOADING HRL ({seed_dir.upper()}) from existing {npy_path}")
+            print(f"\n[{model_num}/{n_models}] LOADING HRL ({seed_dir.upper()}) from existing {npy_path}")
             rewards = np.load(npy_path)
         else:
             if not os.path.exists(model_path + ".zip"):
-                print(f"\n[{model_num}/9] SKIPPING HRL ({seed_dir.upper()}) — model not found: {model_path}")
+                print(f"\n[{model_num}/{n_models}] SKIPPING HRL ({seed_dir.upper()}) — model not found: {model_path}")
                 continue
             print(f"\n{'=' * 70}")
-            print(f"[{model_num}/9] EVALUATING HRL ({seed_dir.upper()}) ACROSS {num_seeds} SEEDS")
+            print(f"[{model_num}/{n_models}] EVALUATING HRL ({seed_dir.upper()}) ACROSS {num_seeds} SEEDS")
             print(f"  Loading model: {model_path}")
             print(f"{'=' * 70}")
             model = MaskablePPO.load(
@@ -231,11 +277,36 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
         print(stats)
         all_stats.append(stats)
 
+    # ── 4. Sequential HPPO (s1, s2, s3 run directories) ──
+    if sequential_model_dir is not None:
+        for seed_idx in range(1, 4):
+            run_dir = os.path.join(sequential_model_dir, f"s{seed_idx}")
+            name = f"sequential_hppo_seed{seed_idx}"
+            model_num += 1
+            npy_path = os.path.join(results_dir, f"{name}_rewards.npy")
+            if os.path.exists(npy_path):
+                print(f"\n[{model_num}/{n_models}] LOADING SEQUENTIAL HPPO (S{seed_idx}) from existing {npy_path}")
+                rewards = np.load(npy_path)
+            else:
+                if not os.path.exists(os.path.join(run_dir, "best_agent_b.pt")):
+                    print(f"\n[{model_num}/{n_models}] SKIPPING SEQUENTIAL HPPO (S{seed_idx}) — model not found: {run_dir}")
+                    continue
+                print(f"\n{'=' * 70}")
+                print(f"[{model_num}/{n_models}] EVALUATING SEQUENTIAL HPPO (S{seed_idx}) ACROSS {num_seeds} SEEDS")
+                print(f"  Loading model: {run_dir}")
+                print(f"{'=' * 70}")
+                rewards = _evaluate_sequential_hppo(rl_config, run_dir, num_seeds)
+                np.save(npy_path, np.array(rewards))
+                print(f"  ✓ Saved {npy_path}")
+            stats = _compute_stats(name, rewards, num_seeds, threshold)
+            print(stats)
+            all_stats.append(stats)
+
     # ── Save all stats to a single log file ──
     with open(os.path.join(results_dir, "evaluation_stats.txt"), "w") as f:
         f.write("\n\n".join(all_stats))
     print(f"\n{'#' * 70}")
-    print(f"EVALUATION COMPLETE — 9/9 models done")
+    print(f"EVALUATION COMPLETE — {n_models}/{n_models} models done")
     print(f"All rewards (.npy) and stats saved to {results_dir}/")
     print(f"{'#' * 70}")
 
@@ -243,6 +314,24 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
 # ============================================================
 # KDE PLOT — picks best seed for each RL model type
 # ============================================================
+
+def _best_seed_rewards(results_dir, prefix, label):
+    """Rewards of the seed (1-3) with the highest mean, or None if none exist."""
+    print(f"  Selecting best {label} seed...")
+    best_mean, best_rewards, best_idx = -np.inf, None, None
+    for seed_idx in range(1, 4):
+        path = os.path.join(results_dir, f"{prefix}{seed_idx}_rewards.npy")
+        if not os.path.exists(path):
+            continue
+        r = np.load(path)
+        m = np.mean(r)
+        print(f"    seed{seed_idx}: mean={m:.4f}")
+        if m > best_mean:
+            best_mean, best_rewards, best_idx = m, r, seed_idx
+    if best_idx is not None:
+        print(f"    → Best: seed{best_idx} (mean={best_mean:.4f})")
+    return best_rewards
+
 
 def plot_kde(num_seeds, title_env_label="Environment", results_dir="results"):
     """Load saved .npy rewards, pick best-mean seed for flat/hrl, and save KDE plot."""
@@ -255,50 +344,25 @@ def plot_kde(num_seeds, title_env_label="Environment", results_dir="results"):
     print("  Loading rule_based_grouped rewards...")
     rule_based_grouped = np.load(os.path.join(results_dir, "rule_based_grouped_rewards.npy"))
 
-    # ── Pick best flat RL seed by mean reward ──
-    print("  Selecting best Flat RL seed...")
-    best_flat_mean, best_flat_rewards, best_flat_idx = -np.inf, None, None
-    for seed_idx in range(1, 4):
-        path = os.path.join(results_dir, f"flat_seed{seed_idx}_rewards.npy")
-        if not os.path.exists(path):
-            continue
-        r = np.load(path)
-        m = np.mean(r)
-        print(f"    seed{seed_idx}: mean={m:.4f}")
-        if m > best_flat_mean:
-            best_flat_mean, best_flat_rewards, best_flat_idx = m, r, seed_idx
-    if best_flat_idx is not None:
-        print(f"    → Best: seed{best_flat_idx} (mean={best_flat_mean:.4f})")
-
-    # ── Pick best HRL seed by mean reward ──
-    print("  Selecting best HRL seed...")
-    best_hrl_mean, best_hrl_rewards, best_hrl_idx = -np.inf, None, None
-    for seed_idx in range(1, 4):
-        path = os.path.join(results_dir, f"hrl_seed{seed_idx}_rewards.npy")
-        if not os.path.exists(path):
-            continue
-        r = np.load(path)
-        m = np.mean(r)
-        print(f"    seed{seed_idx}: mean={m:.4f}")
-        if m > best_hrl_mean:
-            best_hrl_mean, best_hrl_rewards, best_hrl_idx = m, r, seed_idx
-    if best_hrl_idx is not None:
-        print(f"    → Best: seed{best_hrl_idx} (mean={best_hrl_mean:.4f})")
-
-    # ── Build agents dict ──
-    print("  Building KDE plot...")
+    # ── Pick the best seed of each RL family by mean reward ──
     agents = {
         "Heuristic Bay Grouping Agent": rule_based_grouped,
     }
-    if best_flat_rewards is not None:
-        agents["Flat RL"] = best_flat_rewards
-    if best_hrl_rewards is not None:
-        agents["Hierarchical RL"] = best_hrl_rewards
+    for label, prefix in [
+        ("Flat RL", "flat_seed"),
+        ("Hierarchical RL", "hrl_seed"),
+        ("Sequential HPPO", "sequential_hppo_seed"),
+    ]:
+        rewards = _best_seed_rewards(results_dir, prefix, label)
+        if rewards is not None:
+            agents[label] = rewards
 
+    print("  Building KDE plot...")
     colors = {
         "Heuristic Bay Grouping Agent": "#4C78A8",
         "Flat RL": "#59A14F",
         "Hierarchical RL": "#F28E2B",
+        "Sequential HPPO": "#E15759",
     }
 
     plt.rcParams.update({
@@ -378,6 +442,8 @@ if __name__ == "__main__":
 
     FLAT_MODEL_DIR = "stack/models/flat/pointer/large4"
     HRL_MODEL_DIR = "stack/models/hierarchical/pointer/large4"
+    # Seeds 1-3 of --size large_v4_with_margin in s1/, s2/, s3/
+    SEQUENTIAL_MODEL_DIR = "models_trained/sequential_hppo_large_v4"
     NUM_SEEDS = 100
     MAX_STEPS = 500
     THRESHOLD = 3800
@@ -390,6 +456,7 @@ if __name__ == "__main__":
         num_seeds=NUM_SEEDS,
         max_steps=MAX_STEPS,
         threshold=THRESHOLD,
+        sequential_model_dir=SEQUENTIAL_MODEL_DIR,
     )
 
     plot_kde(num_seeds=NUM_SEEDS, title_env_label=env_label,

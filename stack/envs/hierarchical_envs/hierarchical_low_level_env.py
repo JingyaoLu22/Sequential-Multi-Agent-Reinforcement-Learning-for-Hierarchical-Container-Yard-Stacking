@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import gymnasium as gym
 import numpy as np
 
-from envs.stack_gym import StackEnv, StateIds
-from agents.hierarchical_rule_based_agent import HighLevelAgent
+from ..stack_gym import StackEnv, StateIds
+from ...agents.hierarchical_rule_based_agent import HighLevelAgent
 
 
 class HierarchicalLowLevelEnv(gym.Env):

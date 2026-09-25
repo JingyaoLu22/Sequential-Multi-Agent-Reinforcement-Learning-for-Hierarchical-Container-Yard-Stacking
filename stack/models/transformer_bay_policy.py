@@ -36,7 +36,7 @@ from gymnasium import spaces
 
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
-from models.transformer_policy import (
+from .transformer_policy import (
     TransformerFeaturesExtractor,
     PointerDecoder,
 )

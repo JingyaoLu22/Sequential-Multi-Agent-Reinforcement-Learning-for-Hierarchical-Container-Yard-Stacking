@@ -22,9 +22,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import gymnasium as gym
 import numpy as np
 
-from envs.stack_gym import StackEnv
-from agents.hierarchical_rule_based_agent import LowLevelAgent
-from agents.frozen_low_level_agent import FrozenRLLowLevelAgent
+from ..stack_gym import StackEnv
+from ...agents.hierarchical_rule_based_agent import LowLevelAgent
+from ...agents.frozen_low_level_agent import FrozenRLLowLevelAgent
 
 
 class HierarchicalHighLevelEnv(gym.Env):

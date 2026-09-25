@@ -14,11 +14,11 @@ from __future__ import annotations
 import os
 from typing import Any
 from sb3_contrib.ppo_mask import MaskablePPO
-from envs.stack_gym import StackEnv
-from envs.hierarchical_envs.hierarchical_low_level_env import HierarchicalLowLevelEnv
-from envs.hierarchical_envs.hierarchical_high_level_env import HierarchicalHighLevelEnv
+from .envs.stack_gym import StackEnv
+from .envs.hierarchical_envs.hierarchical_low_level_env import HierarchicalLowLevelEnv
+from .envs.hierarchical_envs.hierarchical_high_level_env import HierarchicalHighLevelEnv
 from sb3_contrib.common.wrappers import ActionMasker
-from utils import (
+from .utils import (
     MaskedEvalCallback,
     SaveModelCallback,
     mask_fn,
@@ -30,13 +30,13 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.utils import get_linear_fn
 from wandb.integration.sb3 import WandbCallback
-from models.transformer_policy import MaskableTransformerPolicy
-from models.transformer_bay_policy import MaskableBayTransformerPolicy
-from models.joint_hierarchical_policy import (
+from .models.transformer_policy import MaskableTransformerPolicy
+from .models.transformer_bay_policy import MaskableBayTransformerPolicy
+from .models.joint_hierarchical_policy import (
     MaskableJointMlpPolicy,
     MaskableJointTransformerPolicy,
 )
-from models.joint_diffobs_policy import MaskableDiffObsJointTransformerPolicy
+from .models.joint_diffobs_policy import MaskableDiffObsJointTransformerPolicy
 
 
 def create_env(

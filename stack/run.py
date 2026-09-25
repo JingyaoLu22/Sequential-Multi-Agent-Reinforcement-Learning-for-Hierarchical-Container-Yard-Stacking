@@ -11,14 +11,20 @@ import argparse
 
 import wandb
 
-from train import train
-from utils import set_config, get_device
+from .train import train
+from .configs.device import get_device
+from .configs.environments import ENVIRONMENT_SIZES, add_reward_arguments, set_config
 
 
 def main(args):
 
     # Get environment config (based on args.size which is small, medium, or large)
-    config = set_config(size=args.size, seed=args.seed)
+    config = set_config(
+        size=args.size,
+        seed=args.seed,
+        reward_norm=args.reward_norm,
+        reward_clip=args.reward_clip,
+    )
 
     # Apply optional config overrides from CLI flags
     if args.random_group_sizes:
@@ -92,7 +98,7 @@ if __name__ == "__main__":
         "--size",
         type=str,
         default="small",
-        choices=["small", "small_with_margin", "medium", "medium_with_margin", "large", "large_with_margin", "large_v2", "large_v2_with_margin", "large_v3", "large_v3_with_margin", "large_v4", "large_v4_with_margin"],
+        choices=ENVIRONMENT_SIZES,
         help="Size of the environment configuration.",
     )
     parser.add_argument(
@@ -308,6 +314,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Randomize container count per group around equal average (min 1 per group, sum = num_containers). Varies per seed.",
     )
+    add_reward_arguments(parser)
     args = parser.parse_args()
 
     main(args)

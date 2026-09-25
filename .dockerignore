@@ -1,8 +1,28 @@
+# Build context for the Dockerfile, which copies only pyproject.toml,
+# uv.lock, README.md and stack/.
+# A pattern without "**/" matches only at the repository root.
+
+# Version control, environments, caches
 .git
 .idea
-__pycache__
-*.pyc
-models_trained
-evaluation_results
-*.ipynb
-comand line.txt
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+**/*.ipynb
+
+# Training and evaluation outputs, logs and weights.
+# models/ is the default --save_dir root; stack/models/ is source code and stays.
+wandb/
+runs*/
+models/
+models_trained/
+evaluation_results/
+results/
+**/*.pt
+# Pretrained baseline downloads (see README).
+stack/models/flat/
+stack/models/hierarchical/
+
+# Not used by stack/
+stow/

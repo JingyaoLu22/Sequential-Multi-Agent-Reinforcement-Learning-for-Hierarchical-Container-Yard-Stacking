@@ -23,10 +23,7 @@ Evaluation architecture
        row_idx
           |
           v
-    HierarchicalEnv.step(...)
-          |
-          v
-    ONE StackEnv.step(...)
+    ONE StackEnv.step(bay_idx * n_rows + row_idx)
           |
           v
        reward
@@ -64,19 +61,27 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from sb3_contrib.common.maskable.utils import get_action_masks
+from stable_baselines3.common.vec_env import DummyVecEnv
 
-from ..agents.agent_b import AgentB
-from ..agents.agent_r import AgentR
+from ..models.pointer_actor import (
+    PointerActor,
+    load_actor_state_dict,
+)
+
+from ..configs.device import (
+    get_device,
+)
 
 from ..configs.hierarchical_config import (
     HierarchicalConfig,
 )
 
-from ..envs.hierarchical_envs.hierarchical_env import (
-    HierarchicalEnv,
-)
-from ..envs.hierarchical_envs.vec_hierarchical_env import (
-    VecHierarchicalEnv,
+from ..envs.stack_gym import StackEnv
+
+from ..training.bay_row_layout import (
+    BayRowLayout,
+    select_hierarchical_action,
 )
 
 from .metrics import (
@@ -85,41 +90,6 @@ from .metrics import (
     build_episode_metrics,
     summarize_episodes,
 )
-
-
-# ======================================================================
-# Device
-# ======================================================================
-
-
-def get_device(
-    requested_device: str,
-) -> torch.device:
-    """
-    Resolve evaluation device.
-
-    This follows the same behaviour as training:
-
-        auto:
-            CUDA if available,
-            otherwise CPU.
-    """
-
-    if requested_device == "auto":
-
-        if torch.cuda.is_available():
-
-            return torch.device(
-                "cuda"
-            )
-
-        return torch.device(
-            "cpu"
-        )
-
-    return torch.device(
-        requested_device
-    )
 
 
 # ======================================================================
@@ -226,24 +196,46 @@ def load_checkpoint_config(
 
 
 # ======================================================================
-# Evaluation reward configuration (also imported by the Notebook)
+# Evaluation reward configuration
 # ======================================================================
+#
+# The ONE place both periodic training evaluation (run_sequential_hppo)
+# and this standalone script decide the evaluation reward scale, so the
+# same checkpoint reports the same numbers in both.
 
 
-def make_evaluation_config(environment_config: Dict) -> Dict:
-    """Return a copy configured for unnormalized, unclipped evaluation.
+def make_evaluation_config(
+    environment_config: Dict,
+    use_training_rewards: bool = False,
+) -> Dict:
+    """Copy of the training environment config for evaluation.
 
-    Preserve the public helper used by the step-by-step Notebook viewer.
-    The checkpoint's original training configuration is not modified.
+    By default rewards are raw (no normalization, no clipping), the scale
+    plots.py and the baselines report. use_training_rewards keeps the
+    training run's reward_norm / reward_clip instead.
     """
     evaluation_config = dict(environment_config)
-    evaluation_config["reward_norm"] = False
-    evaluation_config["reward_clip"] = False
+    if not use_training_rewards:
+        evaluation_config["reward_norm"] = False
+        evaluation_config["reward_clip"] = False
     return evaluation_config
 
 
+def add_evaluation_reward_argument(parser: argparse.ArgumentParser) -> None:
+    """--eval_use_training_rewards, shared by training and this script."""
+    parser.add_argument(
+        "--eval_use_training_rewards",
+        action="store_true",
+        help=(
+            "Evaluate with the training run's reward normalization/clipping "
+            "instead of raw rewards (default: raw, identical for training-time "
+            "and standalone evaluation)."
+        ),
+    )
+
+
 # ======================================================================
-# Build evaluation environment + actors
+# Build evaluation actors
 # ======================================================================
 
 
@@ -255,9 +247,8 @@ def build_evaluation_system(
     agent_r_path: Path,
     device: torch.device,
 ) -> Tuple[
-    HierarchicalEnv,
-    AgentB,
-    AgentR,
+    PointerActor,
+    PointerActor,
 ]:
     """
     Build the inference-only architecture.
@@ -266,62 +257,37 @@ def build_evaluation_system(
 
     Execution requires only:
 
-        AgentB
-        AgentR
-        HierarchicalEnv
+        bay actor (Agent B)
+        row actor (Agent R)
+
+    The environments themselves are created by evaluate_policy().
     """
 
     # ==============================================================
-    # Environment
+    # Dimensions come directly from the environment
     # ==============================================================
 
-    env = HierarchicalEnv(
+    probe_env = StackEnv(
         config=environment_config,
     )
 
-    n_bays = int(
-        env.bay_action_space.n
-    )
-
-    n_rows = int(
-        env.row_action_space.n
-    )
-
-    # ==============================================================
-    # Agent B
-    # ==============================================================
-
-    agent_b = AgentB(
-
-        observation_space=(
-            env.bay_observation_space
-        ),
-
-        n_bays=n_bays,
-
-        n_rows_per_bay=n_rows,
-
-        device=device,
-
-        **algorithm_config.agent_kwargs(),
-    )
+    try:
+        layout = BayRowLayout.from_env(
+            probe_env
+        )
+    finally:
+        probe_env.close()
 
     # ==============================================================
-    # Agent R
+    # Agent B / Agent R actors
     # ==============================================================
 
-    agent_r = AgentR(
-
-        observation_space=(
-            env.row_observation_space
-        ),
-
-        n_rows=n_rows,
-
-        device=device,
-
-        **algorithm_config.agent_kwargs(),
+    bay_actor, row_actor = layout.build_actors(
+        **algorithm_config.actor_kwargs(),
     )
+
+    bay_actor.to(device)
+    row_actor.to(device)
 
     # ==============================================================
     # Load trained actor parameters
@@ -341,378 +307,27 @@ def build_evaluation_system(
             f"{agent_r_path}"
         )
 
-    agent_b.load(
-        agent_b_path
+    load_actor_state_dict(
+        bay_actor,
+        torch.load(agent_b_path, map_location=device),
     )
 
-    agent_r.load(
-        agent_r_path
+    load_actor_state_dict(
+        row_actor,
+        torch.load(agent_r_path, map_location=device),
     )
 
     # ==============================================================
     # Evaluation mode
     # ==============================================================
 
-    agent_b.eval()
-    agent_r.eval()
+    bay_actor.eval()
+    row_actor.eval()
 
     return (
-        env,
-        agent_b,
-        agent_r,
+        bay_actor,
+        row_actor,
     )
-
-
-# ======================================================================
-# Evaluate ONE episode
-# ======================================================================
-
-
-@torch.no_grad()
-def evaluate_episode(
-    *,
-    env: HierarchicalEnv,
-    agent_b: AgentB,
-    agent_r: AgentR,
-    episode_index: int,
-    seed: int,
-    deterministic: bool = True,
-    verbose_steps: bool = False,
-) -> EpisodeMetrics:
-    """
-    Run one complete evaluation episode.
-
-    Decision sequence
-    -----------------
-
-        bay_observation
-              |
-              v
-           Agent B
-              |
-              v
-           bay_idx
-              |
-              | NO STEP
-              v
-        local row observation
-              |
-              v
-           Agent R
-              |
-              v
-           row_idx
-              |
-              v
-        env.step(bay_idx, row_idx)
-              |
-              v
-           reward
-
-    No training or gradient computation occurs.
-    """
-
-    # ==============================================================
-    # Reset environment
-    # ==============================================================
-
-    bay_observation, _reset_info = (
-        env.reset(
-            seed=seed
-        )
-    )
-
-    bay_observation = np.asarray(
-        bay_observation,
-        dtype=np.float32,
-    )
-
-    # ==============================================================
-    # Episode traces
-    # ==============================================================
-
-    step_rewards: List[
-        float
-    ] = []
-
-    bay_actions: List[
-        int
-    ] = []
-
-    row_actions: List[
-        int
-    ] = []
-
-    selected_bays: List[
-        int
-    ] = []
-
-    selected_rows: List[
-        int
-    ] = []
-
-    global_actions: List[
-        int
-    ] = []
-
-    terminated = False
-    truncated = False
-
-    final_info: Dict = {}
-
-    step_index = 0
-    cumulative_reward = 0.0
-
-    # ==============================================================
-    # Episode loop
-    # ==============================================================
-
-    while not (
-        terminated
-        or truncated
-    ):
-
-        # ==========================================================
-        # Agent B mask
-        # ==========================================================
-
-        bay_action_mask = np.asarray(
-            env.get_bay_action_mask(),
-            dtype=np.bool_,
-        )
-
-        if not bay_action_mask.any():
-
-            raise RuntimeError(
-                "Evaluation reached a state with no valid Bay action "
-                "before StackEnv reported episode termination or "
-                "truncation."
-            )
-
-        # ==========================================================
-        # Agent B selects BAY
-        # ==========================================================
-
-        bay_idx = agent_b.predict(
-
-            observation=(
-                bay_observation
-            ),
-
-            action_mask=(
-                bay_action_mask
-            ),
-
-            deterministic=(
-                deterministic
-            ),
-        )
-
-        # ==========================================================
-        # Agent R observation + mask
-        # ==========================================================
-        #
-        # No physical environment transition happens here.
-        # ==========================================================
-
-        (
-            row_observation,
-            row_action_mask,
-        ) = env.get_row_decision_input(
-            bay_idx
-        )
-
-        row_observation = np.asarray(
-            row_observation,
-            dtype=np.float32,
-        )
-
-        row_action_mask = np.asarray(
-            row_action_mask,
-            dtype=np.bool_,
-        )
-
-        if not row_action_mask.any():
-
-            raise RuntimeError(
-                "Agent B selected a bay containing no valid Row "
-                "action. Bay/Row masks are inconsistent."
-            )
-
-        # ==========================================================
-        # Agent R selects ROW
-        # ==========================================================
-
-        row_idx = agent_r.predict(
-
-            observation=(
-                row_observation
-            ),
-
-            action_mask=(
-                row_action_mask
-            ),
-
-            deterministic=(
-                deterministic
-            ),
-        )
-
-        # ==========================================================
-        # ONE physical environment step
-        # ==========================================================
-
-        (
-            next_bay_observation,
-            reward,
-            terminated,
-            truncated,
-            info,
-        ) = env.step(
-            bay_idx,
-            row_idx,
-        )
-
-        final_info = dict(
-            info
-        )
-
-        # ==========================================================
-        # Save decision trace
-        # ==========================================================
-
-        reward = float(
-            reward
-        )
-
-        step_rewards.append(
-            reward
-        )
-
-        bay_actions.append(
-            int(
-                bay_idx
-            )
-        )
-
-        row_actions.append(
-            int(
-                row_idx
-            )
-        )
-
-        selected_bays.append(
-            int(
-                info[
-                    "selected_bay"
-                ]
-            )
-        )
-
-        selected_rows.append(
-            int(
-                info[
-                    "selected_row"
-                ]
-            )
-        )
-
-        global_actions.append(
-            int(
-                info[
-                    "global_action"
-                ]
-            )
-        )
-
-        # ==========================================================
-        # Running cumulative reward
-        # ==========================================================
-
-        cumulative_reward += (
-            reward
-        )
-
-        step_index += 1
-
-        # ==========================================================
-        # Optional step-by-step inference output
-        # ==========================================================
-
-        if verbose_steps:
-
-            print(
-                f"Episode "
-                f"{episode_index + 1} | "
-                f"Step "
-                f"{step_index:03d} | "
-                f"Bay "
-                f"{info['selected_bay']} | "
-                f"Row "
-                f"{info['selected_row']} | "
-                f"Reward "
-                f"{reward:8.3f} | "
-                f"Cumulative "
-                f"{cumulative_reward:9.3f}"
-            )
-
-        # ==========================================================
-        # Next Agent B observation
-        # ==========================================================
-
-        bay_observation = np.asarray(
-            next_bay_observation,
-            dtype=np.float32,
-        )
-
-    # ==============================================================
-    # Episode metrics
-    # ==============================================================
-
-    episode_metrics = build_episode_metrics(
-
-        episode_index=(
-            episode_index
-        ),
-
-        step_rewards=(
-            step_rewards
-        ),
-
-        bay_actions=(
-            bay_actions
-        ),
-
-        row_actions=(
-            row_actions
-        ),
-
-        selected_bays=(
-            selected_bays
-        ),
-
-        selected_rows=(
-            selected_rows
-        ),
-
-        global_actions=(
-            global_actions
-        ),
-
-        terminated=(
-            terminated
-        ),
-
-        truncated=(
-            truncated
-        ),
-
-        final_info=(
-            final_info
-        ),
-    )
-
-    return episode_metrics
 
 
 # ======================================================================
@@ -720,11 +335,11 @@ def evaluate_episode(
 # ======================================================================
 
 
-def evaluate_policy_batched(
+def evaluate_policy(
     *,
     environment_config: Dict,
-    agent_b: AgentB,
-    agent_r: AgentR,
+    bay_actor: PointerActor,
+    row_actor: PointerActor,
     n_episodes: int = 10,
     base_seed: int = 42,
     eval_batch_size: int = 8,
@@ -738,23 +353,21 @@ def evaluate_policy_batched(
     """
     Evaluate the two-agent policy over multiple episodes, running up
     to eval_batch_size environments simultaneously (Agent B/Agent R
-    inference batched, StackEnv stepped through VecHierarchicalEnv)
-    instead of one environment/episode at a time.
+    inference batched, StackEnv copies stepped through an SB3
+    DummyVecEnv) instead of one environment/episode at a time.
 
-    Same seed mapping as evaluate_policy()/evaluate_episode() - episode
-    i always uses seed = base_seed + i, regardless of eval_batch_size,
-    round count, or partial final rounds - and the SAME per-episode
-    action sequence, since each of the eval_batch_size environment
-    slots owns its own independent HierarchicalEnv/StackEnv instance
-    (own RNG), exactly like running eval_batch_size single-environment
-    evaluations concurrently rather than one at a time.
+    Episode i always uses seed = base_seed + i, regardless of
+    eval_batch_size, round count, or partial final rounds, and each
+    environment slot owns its own independent StackEnv instance (own
+    RNG). With deterministic=True every episode therefore has exactly
+    the same action sequence for any eval_batch_size, including 1.
 
     Episodes run in rounds of at most eval_batch_size. Within a round,
     every environment slot keeps stepping every iteration (Agent B/
     Agent R inference and StackEnv.step() are always called for the
     full batch), but an `active` mask stops this function from
     recording anything for a slot once its episode has terminated or
-    truncated - VecHierarchicalEnv auto-resets that slot into a new
+    truncated - DummyVecEnv auto-resets that slot into a new
     (uninteresting) episode internally, which is harmless precisely
     because nothing reads that slot's output again after `active`
     flips False for it. On the last, possibly partial round (fewer
@@ -763,12 +376,9 @@ def evaluate_policy_batched(
     nothing and are simply wasted compute for that round.
 
     verbose controls only the "EVALUATION (batched)" header and the
-    one-line-per-episode summary (matching evaluate_policy()'s
-    always-on console output); it is set False by
-    evaluate_for_training() so periodic in-training evaluation stays
-    as quiet as it was before this function existed. verbose_steps
-    (per-decision printing) is independent and still defaults to
-    False either way.
+    one-line-per-episode summary; periodic in-training evaluation sets
+    it False to stay quiet. verbose_steps (per-decision printing) is independent and
+    still defaults to False either way.
     """
 
     if n_episodes <= 0:
@@ -788,10 +398,10 @@ def evaluate_policy_batched(
             "eval_batch_size must be positive."
         )
 
-    agent_b.eval()
-    agent_r.eval()
+    bay_actor.eval()
+    row_actor.eval()
 
-    device = agent_b.device
+    device = next(bay_actor.parameters()).device
 
     episodes: List[
         Optional[EpisodeMetrics]
@@ -812,9 +422,13 @@ def evaluate_policy_batched(
             "=" * 70
         )
 
-    vec_env = VecHierarchicalEnv(
-        config=environment_config,
-        num_envs=eval_batch_size,
+    vec_env = DummyVecEnv(
+        [lambda: StackEnv(config=environment_config)]
+        * eval_batch_size
+    )
+
+    layout = BayRowLayout.from_env(
+        vec_env
     )
 
     try:
@@ -843,21 +457,16 @@ def evaluate_policy_batched(
 
                 k = len(round_indices)
 
-                # Every slot needs a seed (VecHierarchicalEnv.reset()
-                # always resets all eval_batch_size envs), but only
-                # the first k are real for this round - pad with a
-                # valid, arbitrary seed for the rest, marked inactive
-                # below so their results are never read.
-                round_seeds = [
-                    base_seed + i
-                    for i in round_indices
-                ] + [
-                    base_seed + round_indices[0]
-                ] * (eval_batch_size - k)
-
-                bay_observation = vec_env.reset(
-                    seeds=round_seeds
+                # VecEnv.seed(s) resets slot j with seed s + j, so
+                # slot j of this round gets base_seed + round_start + j,
+                # i.e. base_seed + (its episode index). Slots j >= k
+                # are padding for a partial final round and are marked
+                # inactive below so their results are never read.
+                vec_env.seed(
+                    base_seed + round_start
                 )
+
+                observations = vec_env.reset()
 
                 active = np.zeros(
                     eval_batch_size,
@@ -877,92 +486,23 @@ def evaluate_policy_batched(
 
                 while active.any():
 
-                    bay_action_mask = np.asarray(
-                        vec_env.get_bay_action_mask(),
-                        dtype=np.bool_,
-                    )
-
-                    if not bay_action_mask[active].any(axis=-1).all():
-
-                        raise RuntimeError(
-                            "Evaluation reached a state with no valid "
-                            "Bay action before StackEnv reported "
-                            "episode termination or truncation."
-                        )
-
-                    bay_action_tensor, _ = agent_b.act(
-                        observations=torch.as_tensor(
-                            bay_observation,
-                            dtype=torch.float32,
-                            device=device,
-                        ),
-                        action_masks=torch.as_tensor(
-                            bay_action_mask,
-                            dtype=torch.bool,
-                            device=device,
-                        ),
+                    # Same Bay -> Row decision as training rollouts.
+                    action = select_hierarchical_action(
+                        layout,
+                        bay_actor,
+                        row_actor,
+                        torch.as_tensor(observations, dtype=torch.float32, device=device),
+                        get_action_masks(vec_env),
                         deterministic=deterministic,
                     )
 
-                    bay_idx_batch = (
-                        bay_action_tensor
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        .astype(np.int64)
-                    )
-
                     (
-                        row_observation,
-                        row_action_mask,
-                    ) = vec_env.get_row_decision_input(
-                        bay_idx_batch
-                    )
-
-                    row_action_mask = np.asarray(
-                        row_action_mask,
-                        dtype=np.bool_,
-                    )
-
-                    if not row_action_mask[active].any(axis=-1).all():
-
-                        raise RuntimeError(
-                            "Agent B selected a bay containing no "
-                            "valid Row action. Bay/Row masks are "
-                            "inconsistent."
-                        )
-
-                    row_action_tensor, _ = agent_r.act(
-                        observations=torch.as_tensor(
-                            row_observation,
-                            dtype=torch.float32,
-                            device=device,
-                        ),
-                        action_masks=torch.as_tensor(
-                            row_action_mask,
-                            dtype=torch.bool,
-                            device=device,
-                        ),
-                        deterministic=deterministic,
-                    )
-
-                    row_idx_batch = (
-                        row_action_tensor
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        .astype(np.int64)
-                    )
-
-                    (
-                        next_bay_observation,
+                        observations,
                         rewards,
-                        terminated,
-                        truncated,
+                        dones,
                         infos,
                     ) = vec_env.step(
-                        bay_idx_batch,
-                        row_idx_batch,
+                        action.stack_actions
                     )
 
                     for i in range(eval_batch_size):
@@ -970,18 +510,23 @@ def evaluate_policy_batched(
                         if not active[i]:
                             continue
 
+                        global_action = int(action.stack_actions[i])
+                        bay_idx, row_idx = divmod(global_action, layout.n_rows)
+
+                        # StackEnv's own (odd bay, 1-based row) numbering.
+                        (
+                            selected_bay,
+                            selected_row,
+                        ) = vec_env.envs[i]._action_to_bay_row(
+                            global_action
+                        )
+
                         step_rewards[i].append(float(rewards[i]))
-                        bay_actions_acc[i].append(int(bay_idx_batch[i]))
-                        row_actions_acc[i].append(int(row_idx_batch[i]))
-                        selected_bays_acc[i].append(
-                            int(infos[i]["selected_bay"])
-                        )
-                        selected_rows_acc[i].append(
-                            int(infos[i]["selected_row"])
-                        )
-                        global_actions_acc[i].append(
-                            int(infos[i]["global_action"])
-                        )
+                        bay_actions_acc[i].append(bay_idx)
+                        row_actions_acc[i].append(row_idx)
+                        selected_bays_acc[i].append(int(selected_bay))
+                        selected_rows_acc[i].append(int(selected_row))
+                        global_actions_acc[i].append(global_action)
 
                         if verbose_steps:
 
@@ -991,22 +536,29 @@ def evaluate_policy_batched(
                                 f"Step "
                                 f"{len(step_rewards[i]):03d} | "
                                 f"Bay "
-                                f"{infos[i]['selected_bay']} | "
+                                f"{selected_bay} | "
                                 f"Row "
-                                f"{infos[i]['selected_row']} | "
+                                f"{selected_row} | "
                                 f"Reward "
                                 f"{rewards[i]:8.3f} | "
                                 f"Cumulative "
                                 f"{sum(step_rewards[i]):9.3f}"
                             )
 
-                        if terminated[i] or truncated[i]:
-                            final_terminated[i] = bool(terminated[i])
-                            final_truncated[i] = bool(truncated[i])
+                        if dones[i]:
+                            # SB3 folds StackEnv's (terminated,
+                            # truncated) into done plus this flag,
+                            # which is set only when not terminated.
+                            truncated = bool(
+                                infos[i].get(
+                                    "TimeLimit.truncated",
+                                    False,
+                                )
+                            )
+                            final_terminated[i] = not truncated
+                            final_truncated[i] = truncated
                             final_info[i] = dict(infos[i])
                             active[i] = False
-
-                    bay_observation = next_bay_observation
 
                 for local_i, global_i in enumerate(round_indices):
 
@@ -1064,58 +616,6 @@ def evaluate_policy_batched(
     return (
         complete_episodes,
         summary,
-    )
-
-
-# ======================================================================
-# Evaluate multiple episodes
-# ======================================================================
-
-
-def evaluate_policy(
-    *,
-    environment_config: Dict,
-    agent_b: AgentB,
-    agent_r: AgentR,
-    n_episodes: int = 10,
-    base_seed: int = 42,
-    eval_batch_size: int = 8,
-    deterministic: bool = True,
-    verbose_steps: bool = False,
-) -> Tuple[
-    List[EpisodeMetrics],
-    EvaluationSummary,
-]:
-    """
-    Evaluate the two-agent policy over multiple episodes.
-
-    A different deterministic seed is used for each episode:
-
-        episode 0 -> base_seed
-        episode 1 -> base_seed + 1
-        episode 2 -> base_seed + 2
-        ...
-
-    This avoids evaluating the deterministic policy repeatedly on
-    exactly the same environment instance.
-
-    Delegates to evaluate_policy_batched(), which produces identical
-    per-episode results (see its docstring) while running up to
-    eval_batch_size episodes' environments simultaneously instead of
-    one at a time. evaluate_episode()/the single-environment path
-    remains available separately and is what evaluate_policy_batched()
-    is verified against (see stack/tests/test_evaluate_batched.py).
-    """
-
-    return evaluate_policy_batched(
-        environment_config=environment_config,
-        agent_b=agent_b,
-        agent_r=agent_r,
-        n_episodes=n_episodes,
-        base_seed=base_seed,
-        eval_batch_size=eval_batch_size,
-        deterministic=deterministic,
-        verbose_steps=verbose_steps,
     )
 
 
@@ -1542,16 +1042,23 @@ def main(
         config_path
     )
 
-    # Match training_plots' Aritra-style raw evaluation reward when requested.
-    if getattr(args, "raw_rewards", False):
-        environment_config = make_evaluation_config(environment_config)
+    # Same reward scale as the periodic evaluation logged during training.
+    environment_config = make_evaluation_config(
+        environment_config,
+        use_training_rewards=args.eval_use_training_rewards,
+    )
+
+    print(
+        f"Evaluation reward_norm={environment_config['reward_norm']}, "
+        f"reward_clip={environment_config['reward_clip']}"
+    )
 
     # ==============================================================
     # Device
     # ==============================================================
 
-    device = get_device(
-        args.device
+    device = torch.device(
+        get_device(args.device)
     )
 
     print(
@@ -1573,9 +1080,8 @@ def main(
     # ==============================================================
 
     (
-        env,
-        agent_b,
-        agent_r,
+        bay_actor,
+        row_actor,
     ) = build_evaluation_system(
 
         environment_config=(
@@ -1597,110 +1103,104 @@ def main(
         device=device,
     )
 
-    try:
+    # ==============================================================
+    # Evaluation
+    # ==============================================================
 
-        # ==========================================================
-        # Evaluation
-        # ==========================================================
+    (
+        episodes,
+        summary,
+    ) = evaluate_policy(
 
-        (
-            episodes,
-            summary,
-        ) = evaluate_policy(
+        environment_config=environment_config,
 
-            environment_config=environment_config,
+        bay_actor=bay_actor,
 
-            agent_b=agent_b,
+        row_actor=row_actor,
 
-            agent_r=agent_r,
+        n_episodes=(
+            args.episodes
+        ),
 
-            n_episodes=(
-                args.episodes
-            ),
+        base_seed=(
+            args.seed
+        ),
 
-            base_seed=(
-                args.seed
-            ),
+        eval_batch_size=(
+            args.eval_batch_size
+        ),
 
-            eval_batch_size=(
-                args.eval_batch_size
-            ),
+        deterministic=(
+            not args.stochastic
+        ),
 
-            deterministic=(
-                not args.stochastic
-            ),
+        verbose_steps=(
+            args.verbose_steps
+        ),
+    )
 
-            verbose_steps=(
-                args.verbose_steps
-            ),
-        )
+    # ==============================================================
+    # Print metrics
+    # ==============================================================
 
-        # ==========================================================
-        # Print metrics
-        # ==========================================================
+    print_summary(
+        summary
+    )
 
-        print_summary(
+    # ==============================================================
+    # Save JSON
+    # ==============================================================
+
+    save_metrics(
+
+        output_dir=(
+            output_dir
+        ),
+
+        episodes=(
+            episodes
+        ),
+
+        summary=(
             summary
-        )
+        ),
+    )
 
-        # ==========================================================
-        # Save JSON
-        # ==========================================================
+    # ==============================================================
+    # Save plots
+    # ==============================================================
 
-        save_metrics(
+    if not args.no_plots:
 
-            output_dir=(
-                output_dir
-            ),
+        plot_cumulative_rewards(
 
             episodes=(
                 episodes
             ),
 
-            summary=(
-                summary
+            output_dir=(
+                output_dir
+            ),
+
+            show_plot=(
+                args.show_plot
             ),
         )
 
-        # ==========================================================
-        # Save plots
-        # ==========================================================
+        plot_episode_rewards(
 
-        if not args.no_plots:
+            summary=(
+                summary
+            ),
 
-            plot_cumulative_rewards(
+            output_dir=(
+                output_dir
+            ),
 
-                episodes=(
-                    episodes
-                ),
-
-                output_dir=(
-                    output_dir
-                ),
-
-                show_plot=(
-                    args.show_plot
-                ),
-            )
-
-            plot_episode_rewards(
-
-                summary=(
-                    summary
-                ),
-
-                output_dir=(
-                    output_dir
-                ),
-
-                show_plot=(
-                    args.show_plot
-                ),
-            )
-
-    finally:
-
-        env.close()
+            show_plot=(
+                args.show_plot
+            ),
+        )
 
     print(
         "\nEvaluation finished successfully."
@@ -1764,17 +1264,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help=(
             "Number of episodes' environments to run simultaneously "
-            "(batched Agent B/Agent R inference + VecHierarchicalEnv "
+            "(batched Agent B/Agent R inference + DummyVecEnv "
             "stepping). Does not change results, only throughput - "
-            "see evaluate_policy_batched()."
+            "see evaluate_policy()."
         ),
     )
 
-    parser.add_argument(
-        "--raw_rewards",
-        action="store_true",
-        help="Disable reward normalization and clipping, matching the default training evaluation curve.",
-    )
+    add_evaluation_reward_argument(parser)
 
     parser.add_argument(
         "--seed",

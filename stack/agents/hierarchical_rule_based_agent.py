@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from enum import Enum
-from envs.stack_gym import StateIds
+from ..envs.stack_gym import StateIds
 
 
 class AgentLevel(Enum):

@@ -11,6 +11,9 @@ around every minibatch would itself add real overhead and partially
 defeat the point of measuring the fast path. Restricting
 synchronization to these coarse region boundaries avoids both
 problems.
+
+Profiling is opt-in (``--profile``): with it disabled, region() does
+nothing at all, so normal training never synchronizes CUDA for timing.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ class Profiler:
 
     def __init__(
         self,
-        enabled: bool = True,
+        enabled: bool = False,
         device: Optional[torch.device] = None,
     ) -> None:
 

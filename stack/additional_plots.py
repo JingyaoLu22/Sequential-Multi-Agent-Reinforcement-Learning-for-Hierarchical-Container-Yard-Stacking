@@ -4,14 +4,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 
-from envs.stack_gym import StackEnv, StateIds
-from agents.hierarchical_rule_based_agent import HierarchicalAgent
+from .envs.stack_gym import StackEnv, StateIds
+from .agents.hierarchical_rule_based_agent import HierarchicalAgent
 
 from sb3_contrib.ppo_mask import MaskablePPO
 from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.common.wrappers import ActionMasker
-from utils import mask_fn
-from models.joint_hierarchical_policy import MaskableJointTransformerPolicy
+from .utils import mask_fn
+from .models.joint_hierarchical_policy import MaskableJointTransformerPolicy
 
 
 # ============================================================
