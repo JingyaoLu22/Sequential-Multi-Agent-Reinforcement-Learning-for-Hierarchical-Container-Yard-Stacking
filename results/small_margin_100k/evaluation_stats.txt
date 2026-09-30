@@ -1,0 +1,65 @@
+Statistics for random:
+  Seed with highest reward: 8 with reward -19.40
+  Seed with lowest reward:  96 with reward -60.00
+  ==================================================
+  Mean Reward: -42.6540
+  Std Reward:  9.0957
+  Min Reward:  -60.0000
+  Max Reward:  -19.4000
+  % seeds > -30: 7.00%
+  ==================================================
+
+Statistics for rule_based:
+  Seed with highest reward: 57 with reward 37.00
+  Seed with lowest reward:  28 with reward -29.40
+  ==================================================
+  Mean Reward: -4.5640
+  Std Reward:  12.8748
+  Min Reward:  -29.4000
+  Max Reward:  37.0000
+  % seeds > -30: 100.00%
+  ==================================================
+
+Statistics for rule_based_grouped:
+  Seed with highest reward: 34 with reward 93.00
+  Seed with lowest reward:  32 with reward 86.60
+  ==================================================
+  Mean Reward: 88.6960
+  Std Reward:  1.4479
+  Min Reward:  86.6000
+  Max Reward:  93.0000
+  % seeds > -30: 100.00%
+  ==================================================
+
+Statistics for flat_seed1:
+  Seed with highest reward: 98 with reward 58.20
+  Seed with lowest reward:  15 with reward -45.40
+  ==================================================
+  Mean Reward: 0.3700
+  Std Reward:  17.4464
+  Min Reward:  -45.4000
+  Max Reward:  58.2000
+  % seeds > -30: 99.00%
+  ==================================================
+
+Statistics for hrl_seed1:
+  Seed with highest reward: 35 with reward 101.80
+  Seed with lowest reward:  34 with reward 87.20
+  ==================================================
+  Mean Reward: 97.2420
+  Std Reward:  2.3551
+  Min Reward:  87.2000
+  Max Reward:  101.8000
+  % seeds > -30: 100.00%
+  ==================================================
+
+Statistics for sequential_hppo_seed1:
+  Seed with highest reward: 34 with reward 102.60
+  Seed with lowest reward:  10 with reward 84.00
+  ==================================================
+  Mean Reward: 97.6340
+  Std Reward:  2.4199
+  Min Reward:  84.0000
+  Max Reward:  102.6000
+  % seeds > -30: 100.00%
+  ==================================================

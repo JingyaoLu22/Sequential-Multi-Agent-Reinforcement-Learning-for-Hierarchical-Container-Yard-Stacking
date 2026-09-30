@@ -8,11 +8,3 @@ dist/
 
 # Environments
 .venv/
-
-# Training and evaluation outputs
-wandb/
-runs*/
-/models/
-models_trained/
-evaluation_results/
-results/

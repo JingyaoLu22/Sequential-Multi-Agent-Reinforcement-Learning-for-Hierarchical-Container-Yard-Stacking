@@ -1,0 +1,51 @@
+{
+  "environment": {
+    "vessel_shape": [
+      3,
+      3,
+      3
+    ],
+    "yard_shape": [
+      3,
+      4,
+      3
+    ],
+    "num_containers": 27,
+    "group_num": 3,
+    "group_placement": "random",
+    "observation_type": "stack_features_v3",
+    "reward_norm": false,
+    "reward_clip": false,
+    "stack_fill_penalty": true,
+    "container_sizes": true,
+    "enable_imo": true,
+    "seed": 1
+  },
+  "algorithm": {
+    "training_profile": "small",
+    "total_timesteps": 1000000,
+    "learning_rate": 0.0001,
+    "buffer_size": 2048,
+    "batch_size": 64,
+    "n_epochs": 3,
+    "clip_range": 0.2,
+    "ent_coef": 0.15,
+    "checkpoint_freq": 100000,
+    "embed_dim": 128,
+    "n_heads": 4,
+    "n_layers": 2,
+    "dropout": 0.1,
+    "vf_dim": 128,
+    "tanh_clipping": 10.0,
+    "container_start": 2,
+    "container_dim": 1,
+    "include_container_in_encoder": true,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "normalize_advantage": true,
+    "eval_freq": 25000,
+    "n_eval_episodes": 10
+  }
+}

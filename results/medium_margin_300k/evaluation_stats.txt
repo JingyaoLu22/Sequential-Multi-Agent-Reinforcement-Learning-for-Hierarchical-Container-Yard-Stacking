@@ -1,0 +1,54 @@
+Statistics for random:
+  Seed with highest reward: 57 with reward -145.80
+  Seed with lowest reward:  85 with reward -249.80
+  ==================================================
+  Mean Reward: -203.2500
+  Std Reward:  19.0318
+  Min Reward:  -249.8000
+  Max Reward:  -145.8000
+  % seeds > 350: 0.00%
+  ==================================================
+
+Statistics for rule_based:
+  Seed with highest reward: 52 with reward 98.60
+  Seed with lowest reward:  19 with reward -111.20
+  ==================================================
+  Mean Reward: -24.9040
+  Std Reward:  42.3396
+  Min Reward:  -111.2000
+  Max Reward:  98.6000
+  % seeds > 350: 0.00%
+  ==================================================
+
+Statistics for rule_based_grouped:
+  Seed with highest reward: 24 with reward 371.20
+  Seed with lowest reward:  25 with reward 371.20
+  ==================================================
+  Mean Reward: 371.2000
+  Std Reward:  0.0000
+  Min Reward:  371.2000
+  Max Reward:  371.2000
+  % seeds > 350: 100.00%
+  ==================================================
+
+Statistics for hrl_seed1:
+  Seed with highest reward: 89 with reward 405.60
+  Seed with lowest reward:  24 with reward 169.60
+  ==================================================
+  Mean Reward: 371.3540
+  Std Reward:  26.0992
+  Min Reward:  169.6000
+  Max Reward:  405.6000
+  % seeds > 350: 91.00%
+  ==================================================
+
+Statistics for sequential_hppo_seed1:
+  Seed with highest reward: 58 with reward 422.40
+  Seed with lowest reward:  10 with reward 420.40
+  ==================================================
+  Mean Reward: 421.7000
+  Std Reward:  0.9539
+  Min Reward:  420.4000
+  Max Reward:  422.4000
+  % seeds > 350: 100.00%
+  ==================================================

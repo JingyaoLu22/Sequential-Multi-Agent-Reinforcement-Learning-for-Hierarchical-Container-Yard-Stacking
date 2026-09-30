@@ -1,0 +1,23 @@
+2026-09-29 12:22:47,918 INFO    MainThread:3849 [wandb_setup.py:_flush():81] Current SDK version is 0.24.0
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_setup.py:_flush():81] Configure stats pid to 3849
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /Users/jingyaolu/Library/CloudStorage/OneDrive-TUEindhoven/loadmaster.intern/repos/Multi-PPO/stowage_env/wandb/offline-run-20260929_122247-xe0xsi7z/logs/debug.log
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /Users/jingyaolu/Library/CloudStorage/OneDrive-TUEindhoven/loadmaster.intern/repos/Multi-PPO/stowage_env/wandb/offline-run-20260929_122247-xe0xsi7z/logs/debug-internal.log
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_init.py:init():844] calling init triggers
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'vessel_shape': (10, 8, 5), 'yard_shape': (10, 9, 5), 'num_containers': 400, 'group_num': 10, 'group_placement': 'random', 'observation_type': 'stack_features_v3', 'reward_norm': True, 'reward_clip': True, 'stack_fill_penalty': True, 'container_sizes': True, 'enable_imo': True, 'seed': 1, 'training_profile': 'massive', 'total_timesteps': 28000000, 'learning_rate': 0.0001, 'buffer_size': 8192, 'batch_size': 256, 'n_epochs': 5, 'clip_range': 0.15, 'ent_coef': 0.05, 'checkpoint_freq': 100000, 'embed_dim': 128, 'n_heads': 4, 'n_layers': 2, 'dropout': 0.1, 'vf_dim': 128, 'tanh_clipping': 10.0, 'container_start': 2, 'container_dim': 1, 'include_container_in_encoder': True, 'gamma': 0.99, 'gae_lambda': 0.95, 'vf_coef': 0.5, 'max_grad_norm': 0.5, 'normalize_advantage': True, 'eval_freq': 25000, 'n_eval_episodes': 10, 'environment_size': 'large_v4_with_margin', 'architecture': 'sequential_multi_agent_ppo', 'evaluation_initial_base_seed': 100000, 'evaluation_at_step_zero': False, '_wandb': {}}
+2026-09-29 12:22:47,919 INFO    MainThread:3849 [wandb_init.py:init():892] starting backend
+2026-09-29 12:22:49,043 INFO    MainThread:3849 [wandb_init.py:init():895] sending inform_init request
+2026-09-29 12:22:49,070 INFO    MainThread:3849 [wandb_init.py:init():903] backend started and connected
+2026-09-29 12:22:49,087 INFO    MainThread:3849 [wandb_init.py:init():973] updated telemetry
+2026-09-29 12:22:49,102 INFO    MainThread:3849 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-09-29 12:22:49,496 INFO    MainThread:3849 [wandb_init.py:init():1044] starting run threads in backend
+2026-09-29 12:22:49,592 INFO    MainThread:3849 [wandb_run.py:_console_start():2529] atexit reg
+2026-09-29 12:22:49,592 INFO    MainThread:3849 [wandb_run.py:_redirect():2377] redirect: wrap_raw
+2026-09-29 12:22:49,592 INFO    MainThread:3849 [wandb_run.py:_redirect():2446] Wrapping output streams.
+2026-09-29 12:22:49,592 INFO    MainThread:3849 [wandb_run.py:_redirect():2469] Redirects installed.
+2026-09-29 12:22:49,594 INFO    MainThread:3849 [wandb_init.py:init():1084] run started, returning control to user process
+2026-09-29 13:40:59,772 INFO    MainThread:3849 [wandb_run.py:_finish():2295] finishing run stack-sequential-hppo/xe0xsi7z
+2026-09-29 13:40:59,775 INFO    MainThread:3849 [wandb_run.py:_atexit_cleanup():2494] got exitcode: 0
+2026-09-29 13:40:59,776 INFO    MainThread:3849 [wandb_run.py:_restore():2476] restore
+2026-09-29 13:40:59,776 INFO    MainThread:3849 [wandb_run.py:_restore():2482] restore done

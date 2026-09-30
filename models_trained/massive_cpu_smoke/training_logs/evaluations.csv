@@ -1,0 +1,2 @@
+timesteps,mean_reward,std_reward,mean_episode_length,completion_rate,base_seed
+2048,-3451.599997498095,123.19999941438437,400.0,1.0,100000

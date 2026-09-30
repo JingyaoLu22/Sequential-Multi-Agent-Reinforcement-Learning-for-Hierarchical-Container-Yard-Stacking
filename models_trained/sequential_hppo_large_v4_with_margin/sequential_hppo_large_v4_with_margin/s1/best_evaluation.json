@@ -1,0 +1,65 @@
+{
+  "timesteps": 2275000,
+  "evaluation_environment": {
+    "vessel_shape": [
+      10,
+      8,
+      5
+    ],
+    "yard_shape": [
+      10,
+      9,
+      5
+    ],
+    "num_containers": 400,
+    "group_num": 10,
+    "group_placement": "random",
+    "observation_type": "stack_features_v3",
+    "reward_norm": false,
+    "reward_clip": false,
+    "stack_fill_penalty": true,
+    "container_sizes": true,
+    "enable_imo": true,
+    "seed": 100900
+  },
+  "evaluation_index": 90,
+  "base_seed": 100900,
+  "last_seed": 100909,
+  "n_episodes": 10,
+  "mean_reward": 3583.6200041919947,
+  "std_reward": 124.47452477848077,
+  "min_reward": 3324.6000046283007,
+  "max_reward": 3770.3999962955713,
+  "mean_episode_length": 400.0,
+  "std_episode_length": 0.0,
+  "successful_episodes": 10,
+  "completion_rate": 1.0,
+  "truncated_episodes": 0,
+  "truncation_rate": 0.0,
+  "imo_violation_episodes": 0,
+  "all_actions_masked_episodes": 0,
+  "episode_rewards": [
+    3324.6000046283007,
+    3474.5999989062548,
+    3686.4000091403723,
+    3770.3999962955713,
+    3624.0000057071447,
+    3614.2000018954277,
+    3480.4000100046396,
+    3544.000007122755,
+    3611.8000058680773,
+    3705.8000023514032
+  ],
+  "episode_lengths": [
+    400,
+    400,
+    400,
+    400,
+    400,
+    400,
+    400,
+    400,
+    400,
+    400
+  ]
+}

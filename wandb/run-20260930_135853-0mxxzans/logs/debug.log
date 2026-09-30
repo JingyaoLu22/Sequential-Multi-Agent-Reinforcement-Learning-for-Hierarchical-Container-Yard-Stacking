@@ -1,0 +1,13 @@
+2026-09-30 13:58:53,913 INFO    MainThread:13465 [wandb_setup.py:_flush():81] Current SDK version is 0.24.0
+2026-09-30 13:58:53,914 INFO    MainThread:13465 [wandb_setup.py:_flush():81] Configure stats pid to 13465
+2026-09-30 13:58:53,914 INFO    MainThread:13465 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-09-30 13:58:53,915 INFO    MainThread:13465 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /Users/jingyaolu/Library/CloudStorage/OneDrive-TUEindhoven/loadmaster.intern/repos/Multi-PPO/stowage_env/wandb/run-20260930_135853-0mxxzans/logs/debug.log
+2026-09-30 13:58:53,915 INFO    MainThread:13465 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /Users/jingyaolu/Library/CloudStorage/OneDrive-TUEindhoven/loadmaster.intern/repos/Multi-PPO/stowage_env/wandb/run-20260930_135853-0mxxzans/logs/debug-internal.log
+2026-09-30 13:58:53,915 INFO    MainThread:13465 [wandb_init.py:init():844] calling init triggers
+2026-09-30 13:58:53,915 INFO    MainThread:13465 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'vessel_shape': (3, 3, 3), 'yard_shape': (3, 4, 3), 'num_containers': 27, 'group_num': 3, 'group_placement': 'random', 'observation_type': 'stack_features_v3', 'reward_norm': False, 'reward_clip': False, 'stack_fill_penalty': True, 'container_sizes': True, 'enable_imo': True, 'seed': 1, 'training_profile': 'small', 'total_timesteps': 1000000, 'learning_rate': 0.0001, 'buffer_size': 2048, 'batch_size': 64, 'n_epochs': 3, 'clip_range': 0.2, 'ent_coef': 0.15, 'checkpoint_freq': 100000, 'embed_dim': 128, 'n_heads': 4, 'n_layers': 2, 'dropout': 0.1, 'vf_dim': 128, 'tanh_clipping': 10.0, 'container_start': 2, 'container_dim': 1, 'include_container_in_encoder': True, 'gamma': 0.99, 'gae_lambda': 0.95, 'vf_coef': 0.5, 'max_grad_norm': 0.5, 'normalize_advantage': True, 'final_learning_rate': 1e-05, 'final_ent_coef': 0.015, 'target_kl': 0.02, 'eval_freq': 25000, 'n_eval_episodes': 10, 'environment_size': 'small_with_margin', 'architecture': 'sequential_multi_agent_ppo', 'evaluation_initial_base_seed': 100000, 'evaluation_at_step_zero': False, '_wandb': {}}
+2026-09-30 13:58:53,915 INFO    MainThread:13465 [wandb_init.py:init():892] starting backend
+2026-09-30 13:58:54,194 INFO    MainThread:13465 [wandb_init.py:init():895] sending inform_init request
+2026-09-30 13:58:54,228 INFO    MainThread:13465 [wandb_init.py:init():903] backend started and connected
+2026-09-30 13:58:54,241 INFO    MainThread:13465 [wandb_init.py:init():973] updated telemetry
+2026-09-30 13:58:54,262 INFO    MainThread:13465 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
