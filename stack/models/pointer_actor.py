@@ -1,46 +1,31 @@
 """
-Masked Transformer + Pointer Network actor shared by Agent B and Agent R.
+Masked Transformer + Pointer Network actor for both Agent B and Agent R,
+built from transformer_policy.py's TransformerFeaturesExtractor and
+PointerDecoder:
 
-Both actors are the existing transformer_policy.py architecture - the
-same TransformerFeaturesExtractor encoder and PointerDecoder - and differ
-only in which stack tokens they see and how tokens map to actions:
+    obs (B, n_stacks * F) -> encoder -> stack tokens (B, n_stacks, D)
+      -> mean-pool each run of tokens_per_action tokens -> (B, n_actions, D)
+      -> PointerDecoder -> logits (B, n_actions), invalid actions -inf
 
-    Agent B (bays): all n_bays * n_rows stack tokens of the global
-                    observation, mean-pooled per bay (tokens_per_action
-                    = n_rows) into n_bays action tokens.
-
-    Agent R (rows): the n_rows stack tokens of the selected bay, one
-                    action per token (tokens_per_action = 1).
-
-    obs (B, n_stacks * F)
-      └─ TransformerFeaturesExtractor → GE (B, n_stacks, D), container (B, G)
-      └─ mean-pool each tokens_per_action run → (B, n_actions, D)
-      └─ PointerDecoder → logits (B, n_actions)
-      └─ invalid actions → -inf
+Agent B sees all n_bays * n_rows tokens pooled per bay (tokens_per_action
+= n_rows); Agent R sees the selected bay's n_rows tokens, one per action.
 """
 
 from __future__ import annotations
 
-from typing import Mapping, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 from gymnasium import spaces
 from torch.distributions import Categorical
 
-from .transformer_policy import (
-    PointerDecoder,
-    TransformerFeaturesExtractor,
-)
+from .transformer_policy import PointerDecoder, TransformerFeaturesExtractor
 
 
 class PointerActor(nn.Module):
-    """
-    Categorical actor over n_stacks // tokens_per_action actions.
-
-    Stack tokens must be ordered so that each action's tokens are
-    contiguous, as StackEnv's bay-major stack_features_v3 layout is.
-    """
+    """Categorical actor over n_stacks // tokens_per_action actions; each
+    action's tokens must be contiguous (StackEnv's tokens are bay-major)."""
 
     def __init__(
         self,
@@ -57,12 +42,8 @@ class PointerActor(nn.Module):
         container_dim: int = 1,
     ) -> None:
         super().__init__()
-
-        if n_stacks <= 0 or tokens_per_action <= 0 or n_stacks % tokens_per_action:
-            raise ValueError(
-                f"n_stacks={n_stacks} must be a positive multiple of "
-                f"tokens_per_action={tokens_per_action}."
-            )
+        if n_stacks % tokens_per_action:
+            raise ValueError(f"n_stacks={n_stacks} must be a multiple of tokens_per_action={tokens_per_action}.")
 
         self.n_stacks = n_stacks
         self.tokens_per_action = tokens_per_action
@@ -80,7 +61,6 @@ class PointerActor(nn.Module):
             container_start=container_start,
             container_dim=container_dim,
         )
-
         self.decoder = PointerDecoder(
             embed_dim=embed_dim,
             n_stacks=self.n_actions,
@@ -89,36 +69,23 @@ class PointerActor(nn.Module):
             tanh_clipping=tanh_clipping,
         )
 
-    def forward(
-        self,
-        observations: torch.Tensor,
-        action_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Masked action logits (B, n_actions); mask True = valid."""
+    def forward(self, observations: torch.Tensor, action_masks: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Action logits (B, n_actions), -inf where the mask is False."""
 
         features = self.encoder(observations)
         enc_size = self.n_stacks * self.embed_dim
-
         action_embeddings = features[:, :enc_size].view(
             -1, self.n_actions, self.tokens_per_action, self.embed_dim
         ).mean(dim=2)
 
         logits = self.decoder(action_embeddings, features[:, enc_size:])
-
         if action_masks is not None:
             logits = logits.masked_fill(~action_masks, float("-inf"))
-
         return logits
 
-    def get_distribution(
-        self,
-        observations: torch.Tensor,
-        action_masks: Optional[torch.Tensor] = None,
-    ) -> Categorical:
-        # No argument validation: it synchronizes with the GPU on every
-        # call. Callers guarantee every row has a valid action
-        # (select_hierarchical_action() checks it once, on the CPU).
-        return Categorical(logits=self(observations, action_masks), validate_args=False)
+    # Categorical(validate_args=False) everywhere: validation would sync with
+    # the GPU on every call, and select_hierarchical_action() already checks
+    # (once, on the CPU) that every row has a valid action.
 
     @torch.no_grad()
     def act(
@@ -131,12 +98,7 @@ class PointerActor(nn.Module):
 
         logits = self(observations, action_masks)
         distribution = Categorical(logits=logits, validate_args=False)
-
-        if deterministic:
-            actions = logits.argmax(dim=-1)
-        else:
-            actions = distribution.sample()
-
+        actions = logits.argmax(dim=-1) if deterministic else distribution.sample()
         return actions, distribution.log_prob(actions)
 
     def evaluate_actions(
@@ -145,21 +107,8 @@ class PointerActor(nn.Module):
         actions: torch.Tensor,
         action_masks: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Log-probabilities (B,) and entropies (B,) of stored actions
-        under the current parameters, for the PPO ratio."""
+        """Log-probabilities and entropies (B,) of stored actions under the
+        current parameters, for the PPO ratio."""
 
-        distribution = self.get_distribution(observations, action_masks)
-
+        distribution = Categorical(logits=self(observations, action_masks), validate_args=False)
         return distribution.log_prob(actions), distribution.entropy()
-
-
-def load_actor_state_dict(
-    actor: PointerActor,
-    state_dict: Mapping[str, torch.Tensor],
-) -> None:
-    """Strictly load actor parameters, also from checkpoints saved while
-    the actor was wrapped in AgentB/AgentR (keys prefixed "policy.")."""
-
-    actor.load_state_dict(
-        {key.removeprefix("policy."): value for key, value in state_dict.items()}
-    )

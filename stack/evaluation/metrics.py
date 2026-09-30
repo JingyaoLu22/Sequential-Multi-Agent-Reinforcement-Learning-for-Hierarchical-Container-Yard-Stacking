@@ -3,17 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
-
-
-def _floats(values: Sequence[float]) -> list[float]:
-    return [float(value) for value in values]
-
-
-def _ints(values: Sequence[int]) -> list[int]:
-    return [int(value) for value in values]
 
 
 @dataclass
@@ -21,13 +13,10 @@ class EpisodeMetrics:
     episode_index: int
     total_reward: float
     episode_length: int
-    step_rewards: list[float]
-    cumulative_rewards: list[float]
-    bay_actions: list[int]
-    row_actions: list[int]
-    selected_bays: list[int]
-    selected_rows: list[int]
-    global_actions: list[int]
+    step_rewards: List[float]
+    bay_actions: List[int]
+    row_actions: List[int]
+    global_actions: List[int]
     terminated: bool
     truncated: bool
     containers_retrieved: Optional[int]
@@ -40,9 +29,7 @@ class EpisodeMetrics:
         return self.containers_remaining == 0
 
     def to_dict(self) -> Dict[str, Any]:
-        result = asdict(self)
-        result["completed_successfully"] = self.completed_successfully
-        return result
+        return {**asdict(self), "completed_successfully": self.completed_successfully}
 
 
 @dataclass
@@ -60,8 +47,8 @@ class EvaluationSummary:
     truncation_rate: float
     imo_violation_episodes: int
     all_actions_masked_episodes: int
-    episode_rewards: list[float]
-    episode_lengths: list[int]
+    episode_rewards: List[float]
+    episode_lengths: List[int]
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -70,82 +57,57 @@ class EvaluationSummary:
 def build_episode_metrics(
     *,
     episode_index: int,
-    step_rewards: Sequence[float],
-    bay_actions: Sequence[int],
-    row_actions: Sequence[int],
-    selected_bays: Sequence[int],
-    selected_rows: Sequence[int],
-    global_actions: Sequence[int],
+    step_rewards: List[float],
+    bay_actions: List[int],
+    row_actions: List[int],
+    global_actions: List[int],
     terminated: bool,
     truncated: bool,
     final_info: Dict[str, Any],
 ) -> EpisodeMetrics:
-    rewards = _floats(step_rewards)
-    traces = {
-        "bay_actions": _ints(bay_actions),
-        "row_actions": _ints(row_actions),
-        "selected_bays": _ints(selected_bays),
-        "selected_rows": _ints(selected_rows),
-        "global_actions": _ints(global_actions),
-    }
-    expected = len(rewards)
-    for name, values in traces.items():
-        if len(values) != expected:
-            raise ValueError(
-                f"{name} length mismatch. Expected {expected}, received {len(values)}."
-            )
+    """One finished episode; final_info is StackEnv's info of its last step."""
 
-    cumulative = np.cumsum(rewards, dtype=np.float64).astype(float).tolist()
+    def optional_int(key: str) -> Optional[int]:
+        return None if final_info.get(key) is None else int(final_info[key])
+
     return EpisodeMetrics(
-        episode_index=int(episode_index),
-        total_reward=float(cumulative[-1]) if cumulative else 0.0,
-        episode_length=expected,
-        step_rewards=rewards,
-        cumulative_rewards=cumulative,
-        bay_actions=traces["bay_actions"],
-        row_actions=traces["row_actions"],
-        selected_bays=traces["selected_bays"],
-        selected_rows=traces["selected_rows"],
-        global_actions=traces["global_actions"],
-        terminated=bool(terminated),
-        truncated=bool(truncated),
-        containers_retrieved=_optional_int(final_info.get("containers_retrieved")),
-        containers_remaining=_optional_int(final_info.get("containers_remaining")),
+        episode_index=episode_index,
+        total_reward=float(sum(step_rewards)),
+        episode_length=len(step_rewards),
+        step_rewards=step_rewards,
+        bay_actions=bay_actions,
+        row_actions=row_actions,
+        global_actions=global_actions,
+        terminated=terminated,
+        truncated=truncated,
+        containers_retrieved=optional_int("containers_retrieved"),
+        containers_remaining=optional_int("containers_remaining"),
         imo_violation=bool(final_info.get("imo_violation", False)),
         all_actions_masked=bool(final_info.get("all_actions_masked", False)),
     )
 
 
-def _optional_int(value: Any) -> Optional[int]:
-    return None if value is None else int(value)
-
-
 def summarize_episodes(episodes: Sequence[EpisodeMetrics]) -> EvaluationSummary:
-    if not episodes:
-        raise ValueError("Cannot summarize zero evaluation episodes.")
-
-    rewards = np.asarray([episode.total_reward for episode in episodes], dtype=np.float64)
-    lengths = np.asarray([episode.episode_length for episode in episodes], dtype=np.float64)
-    n_episodes = len(episodes)
+    rewards = np.array([episode.total_reward for episode in episodes])
+    lengths = np.array([episode.episode_length for episode in episodes])
+    n = len(episodes)
     successful = sum(episode.completed_successfully for episode in episodes)
     truncated = sum(episode.truncated for episode in episodes)
-    violations = sum(episode.imo_violation for episode in episodes)
-    masked = sum(episode.all_actions_masked for episode in episodes)
 
     return EvaluationSummary(
-        n_episodes=n_episodes,
+        n_episodes=n,
         mean_reward=float(rewards.mean()),
         std_reward=float(rewards.std()),
         min_reward=float(rewards.min()),
         max_reward=float(rewards.max()),
         mean_episode_length=float(lengths.mean()),
         std_episode_length=float(lengths.std()),
-        successful_episodes=int(successful),
-        completion_rate=float(successful / n_episodes),
-        truncated_episodes=int(truncated),
-        truncation_rate=float(truncated / n_episodes),
-        imo_violation_episodes=int(violations),
-        all_actions_masked_episodes=int(masked),
-        episode_rewards=_floats(rewards),
-        episode_lengths=_ints(lengths),
+        successful_episodes=successful,
+        completion_rate=successful / n,
+        truncated_episodes=truncated,
+        truncation_rate=truncated / n,
+        imo_violation_episodes=sum(episode.imo_violation for episode in episodes),
+        all_actions_masked_episodes=sum(episode.all_actions_masked for episode in episodes),
+        episode_rewards=rewards.tolist(),
+        episode_lengths=lengths.tolist(),
     )

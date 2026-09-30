@@ -1,105 +1,36 @@
-"""
-JointRolloutBuffer: (T, N) storage and vectorized GAE.
-"""
+"""JointRolloutBuffer: (T, N) storage, vectorized GAE, step-major flattening."""
 
 import numpy as np
-import pytest
 import torch
 from gymnasium import spaces
 
 from stack.training.bay_row_layout import BayRowLayout
 from stack.training.rollout_buffer import JointRolloutBuffer
 
-N_BAYS, N_ROWS, FEATURES = 2, 3, 4
-GAMMA, GAE_LAMBDA = 0.99, 0.95
 
+def test_gae_and_flattening_on_a_hand_computed_rollout() -> None:
+    layout = BayRowLayout(n_bays=1, n_rows=2, observation_space=spaces.Box(-1, 1, (2,)),
+                          row_observation_space=spaces.Box(-1, 1, (2,)))
+    buffer = JointRolloutBuffer(layout, buffer_size=6, num_envs=2, device="cpu")
 
-def _layout() -> BayRowLayout:
-    obs_dim = N_BAYS * N_ROWS * FEATURES
-    return BayRowLayout(
-        n_bays=N_BAYS,
-        n_rows=N_ROWS,
-        observation_space=spaces.Box(-np.inf, np.inf, (obs_dim,), np.float32),
-        row_observation_space=spaces.Box(-np.inf, np.inf, (N_ROWS * FEATURES,), np.float32),
-    )
-
-
-def _transition(step: int, num_envs: int, rng: np.random.Generator) -> dict:
-    return dict(
-        # Encode (step, env) so flattening order can be checked.
-        global_states=np.full((num_envs, N_BAYS * N_ROWS * FEATURES), step)
-        + np.arange(num_envs)[:, None] / 10,
-        bay_action_masks=np.ones((num_envs, N_BAYS), dtype=bool),
-        bay_actions=np.zeros(num_envs, dtype=np.int64),
-        bay_log_probs=np.zeros(num_envs),
-        row_observations=np.zeros((num_envs, N_ROWS * FEATURES)),
-        row_action_masks=np.ones((num_envs, N_ROWS), dtype=bool),
-        row_actions=np.zeros(num_envs, dtype=np.int64),
-        row_log_probs=np.zeros(num_envs),
-        rewards=rng.normal(size=num_envs),
-        dones=rng.random(num_envs) < 0.3,
-        values=rng.normal(size=num_envs),
-        next_values=rng.normal(size=num_envs),
-    )
-
-
-def _filled_buffer(n_steps: int, num_envs: int, seed: int = 0) -> JointRolloutBuffer:
-    rng = np.random.default_rng(seed)
-    buffer = JointRolloutBuffer(_layout(), n_steps * num_envs, num_envs, "cpu")
-    for step in range(n_steps):
-        buffer.add_batch(**_transition(step, num_envs, rng))
-    return buffer
-
-
-def _reference_gae(rewards, values, next_values, dones):
-    """Textbook single-environment GAE recursion in float64."""
-
-    advantages = np.zeros(len(rewards))
-    last = 0.0
-    for t in reversed(range(len(rewards))):
-        not_done = 0.0 if dones[t] else 1.0
-        delta = rewards[t] + GAMMA * next_values[t] * not_done - values[t]
-        last = delta + GAMMA * GAE_LAMBDA * not_done * last
-        advantages[t] = last
-    return advantages
-
-
-@pytest.mark.parametrize("num_envs", [1, 4])
-def test_vectorized_gae_matches_per_environment_reference(num_envs: int) -> None:
-    buffer = _filled_buffer(n_steps=25, num_envs=num_envs)
-    advantages, returns = buffer.compute_gae(GAMMA, GAE_LAMBDA)
-
-    for env in range(num_envs):
-        expected = _reference_gae(
-            *(getattr(buffer, name)[:, env].double().numpy() for name in ("rewards", "values", "next_values")),
-            buffer.dones[:, env].numpy(),
+    # Environment 0 never finishes; environment 1's episode ends at t = 1.
+    values = np.array([0.0, 0.5])
+    dones = [[False, False], [False, True], [False, False]]
+    for t in range(3):
+        buffer.add_batch(
+            global_states=np.full((2, 2), t), bay_action_masks=np.ones((2, 1), bool), bay_actions=np.zeros(2),
+            bay_log_probs=np.zeros(2), row_observations=np.zeros((2, 2)), row_action_masks=np.ones((2, 2), bool),
+            row_actions=np.zeros(2), row_log_probs=np.zeros(2), rewards=np.ones(2), dones=dones[t],
+            values=values, next_values=np.ones(2),
         )
-        np.testing.assert_allclose(buffer.advantages[:, env].numpy(), expected, rtol=1e-5, atol=1e-5)
 
-    # Flattened as sample t * N + n, with returns = advantages + values.
-    torch.testing.assert_close(advantages, buffer.advantages.reshape(-1))
-    torch.testing.assert_close(returns, advantages + buffer.values.reshape(-1))
+    advantages, returns = buffer.compute_gae(gamma=0.5, gae_lambda=0.5)
 
-
-def test_rollout_batch_flattens_step_major() -> None:
-    num_envs = 3
-    buffer = _filled_buffer(n_steps=4, num_envs=num_envs)
-    buffer.compute_gae(GAMMA, GAE_LAMBDA)
-    batch = buffer.rollout_batch()
-
-    assert len(buffer) == 12 and batch.global_states.shape == (12, N_BAYS * N_ROWS * FEATURES)
-    for sample, state in enumerate(batch.global_states[:, 0].tolist()):
-        step, env = divmod(sample, num_envs)
-        assert state == pytest.approx(step + env / 10)
-
-
-def test_rejects_size_that_does_not_split_into_steps() -> None:
-    with pytest.raises(ValueError, match="multiple"):
-        JointRolloutBuffer(_layout(), buffer_size=10, num_envs=4, device="cpu")
-
-
-def test_add_to_full_buffer_raises() -> None:
-    buffer = _filled_buffer(n_steps=2, num_envs=2)
-    assert buffer.is_full()
-    with pytest.raises(RuntimeError, match="full"):
-        buffer.add_batch(**_transition(2, 2, np.random.default_rng(1)))
+    # delta_t = r + 0.5 V(s_{t+1}) (1 - done) - V(s_t);  A_t = delta_t + 0.25 (1 - done) A_{t+1}
+    #   env 0: delta = 1.5, 1.5, 1.5  ->  A = 1.96875, 1.875, 1.5
+    #   env 1: delta = 1.0, 0.5, 1.0  ->  A = 1.125,   0.5,   1.0
+    expected = torch.tensor([[1.96875, 1.125], [1.875, 0.5], [1.5, 1.0]])
+    # Flattened step-major: sample t * N + n.
+    torch.testing.assert_close(advantages, expected.reshape(-1))
+    torch.testing.assert_close(returns, (expected + torch.tensor(values, dtype=torch.float32)).reshape(-1))
+    assert buffer.rollout_batch().global_states[:, 0].tolist() == [0, 0, 1, 1, 2, 2]

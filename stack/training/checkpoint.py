@@ -1,15 +1,11 @@
 """
-Everything Sequential HPPO writes to or restores from disk.
+What Sequential HPPO writes to and restores from a run's save directory:
 
-Two kinds of files live in a run's save directory:
-
-    {prefix}_agent_b.pt / _agent_r.pt / _critic.pt / _config.json
-        Model exports ("best" and "final") for evaluation.
-
+    {prefix}_bay_actor.pt / _row_actor.pt / _critic.pt / _config.json
+        "best" and "final" model exports for evaluation.
     latest_training_state.pt
-        The one restartable training state: network and optimizer states,
-        step/episode counters, the best evaluation reward and every RNG
-        state, overwritten atomically at each checkpoint.
+        The restartable state: networks, optimizers, counters, best
+        evaluation reward, RNG states and each StackEnv copy's episode seed.
 """
 
 from __future__ import annotations
@@ -22,28 +18,19 @@ from typing import Any, Dict
 
 import numpy as np
 import torch
+from stable_baselines3.common.vec_env import VecEnv
 
 from ..configs.hierarchical_config import HierarchicalConfig
-from ..models.pointer_actor import load_actor_state_dict
 from .sequential_trainer import SequentialPPOTrainer
 
 LATEST_TRAINING_STATE_FILENAME = "latest_training_state.pt"
-TRAINING_CHECKPOINT_FORMAT_VERSION = 1
+TRAINING_CHECKPOINT_FORMAT_VERSION = 2
 
-# Settings a resumed run may change: horizons, evaluation cadence, and
-# buffer_size, which is rounded up to a multiple of --num_envs.
-_RESUMABLE_ALGORITHM_KEYS = (
-    "total_timesteps",
-    "eval_freq",
-    "n_eval_episodes",
-    "checkpoint_freq",
-    "buffer_size",
-)
-
-
-# ======================================================================
-# Model exports
-# ======================================================================
+# Settings a resumed run may change (buffer_size is rounded up to a
+# multiple of --num_envs). The schedules and target_kl only shape future
+# updates, so they may be switched on for a run that started without them.
+_RESUMABLE_ALGORITHM_KEYS = ("total_timesteps", "eval_freq", "n_eval_episodes", "checkpoint_freq", "buffer_size",
+                             "final_learning_rate", "final_ent_coef", "target_kl")
 
 
 def save_models(
@@ -53,49 +40,27 @@ def save_models(
     algorithm_config: HierarchicalConfig,
     prefix: str,
 ) -> None:
-    """Write {prefix}_agent_b/_agent_r/_critic.pt and {prefix}_config.json.
-
-    The actor file names predate removing AgentB/AgentR and are kept so
-    existing tooling keeps working.
-    """
-
     save_dir.mkdir(parents=True, exist_ok=True)
-
-    torch.save(trainer.bay_actor.state_dict(), save_dir / f"{prefix}_agent_b.pt")
-    torch.save(trainer.row_actor.state_dict(), save_dir / f"{prefix}_agent_r.pt")
+    torch.save(trainer.bay_actor.state_dict(), save_dir / f"{prefix}_bay_actor.pt")
+    torch.save(trainer.row_actor.state_dict(), save_dir / f"{prefix}_row_actor.pt")
     torch.save(trainer.critic.state_dict(), save_dir / f"{prefix}_critic.pt")
-
     config = {"environment": environment_config, "algorithm": algorithm_config.to_dict()}
-    with open(save_dir / f"{prefix}_config.json", "w", encoding="utf-8") as file:
-        json.dump(config, file, indent=2)
-
+    (save_dir / f"{prefix}_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     print(f"Saved checkpoint to: {save_dir}")
-
-
-# ======================================================================
-# Restartable training state
-# ======================================================================
 
 
 def save_training_state(
     save_dir: Path,
     trainer: SequentialPPOTrainer,
+    env: VecEnv,
     environment_config: Dict,
     algorithm_config: HierarchicalConfig,
     best_eval_reward: float,
 ) -> None:
-    """Atomically overwrite latest_training_state.pt.
+    """Atomically overwrite latest_training_state.pt. Saved only after a
+    complete PPO update, so a resumed run starts with env.reset()."""
 
-    Written only after a complete PPO update, so the in-progress episode
-    and rollout buffer are not needed: a restored run starts with
-    env.reset() and the exact updated networks and optimizers.
-    """
-
-    rng_state = {
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch": torch.get_rng_state(),
-    }
+    rng_state = {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state()}
     if torch.cuda.is_available():
         rng_state["torch_cuda"] = torch.cuda.get_rng_state_all()
 
@@ -104,10 +69,8 @@ def save_training_state(
         "environment_config": environment_config,
         "algorithm_config": algorithm_config.to_dict(),
         "trainer_state": {
-            # Key names predate removing AgentB/AgentR; kept so existing
-            # checkpoints stay loadable.
-            "agent_b_state_dict": trainer.bay_actor.state_dict(),
-            "agent_r_state_dict": trainer.row_actor.state_dict(),
+            "bay_actor_state_dict": trainer.bay_actor.state_dict(),
+            "row_actor_state_dict": trainer.row_actor.state_dict(),
             "critic_state_dict": trainer.critic.state_dict(),
             "bay_optimizer_state_dict": trainer.bay_optimizer.state_dict(),
             "row_optimizer_state_dict": trainer.row_optimizer.state_dict(),
@@ -117,6 +80,9 @@ def save_training_state(
         },
         "best_eval_reward": float(best_eval_reward),
         "rng_state": rng_state,
+        # StackEnv draws each episode from its seed, incremented on every
+        # reset: this is the environments' whole random state.
+        "env_seeds": [int(seed) for seed in env.get_attr("seed")],
     }
 
     path = save_dir / LATEST_TRAINING_STATE_FILENAME
@@ -131,39 +97,32 @@ def save_training_state(
     finally:
         temporary.unlink(missing_ok=True)
 
-    print(
-        "Latest training checkpoint saved (overwriting previous): "
-        f"{path} at step {trainer.total_environment_steps:,}",
-        flush=True,
-    )
+    print(f"Latest training checkpoint saved (overwriting previous): {path} "
+          f"at step {trainer.total_environment_steps:,}", flush=True)
 
 
 def resume_training_state(
     save_dir: Path,
     trainer: SequentialPPOTrainer,
+    env: VecEnv,
     environment_config: Dict,
     algorithm_config: HierarchicalConfig,
 ) -> float:
-    """Restore latest_training_state.pt into ``trainer`` and the process
-    RNGs; return the checkpoint's best evaluation reward.
-
-    Refuses a checkpoint whose environment or model/training settings
-    differ from this run's.
-    """
+    """Restore latest_training_state.pt into ``trainer``, ``env``'s episode
+    seeds and the process RNGs, and return its best evaluation reward.
+    Refuses a checkpoint with other environment or model/training settings."""
 
     path = save_dir / LATEST_TRAINING_STATE_FILENAME
-    # Our own trusted file: it contains Python RNG state, not only tensors.
+    # Our own trusted file: it holds Python RNG state, not only tensors.
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-
     if checkpoint.get("format_version") != TRAINING_CHECKPOINT_FORMAT_VERSION:
         raise ValueError(f"Unsupported training checkpoint format in {path}.")
-
     _check_compatible(checkpoint["environment_config"], checkpoint["algorithm_config"],
                       environment_config, algorithm_config)
 
     state = checkpoint["trainer_state"]
-    load_actor_state_dict(trainer.bay_actor, state["agent_b_state_dict"])
-    load_actor_state_dict(trainer.row_actor, state["agent_r_state_dict"])
+    trainer.bay_actor.load_state_dict(state["bay_actor_state_dict"])
+    trainer.row_actor.load_state_dict(state["row_actor_state_dict"])
     trainer.critic.load_state_dict(state["critic_state_dict"])
     trainer.bay_optimizer.load_state_dict(state["bay_optimizer_state_dict"])
     trainer.row_optimizer.load_state_dict(state["row_optimizer_state_dict"])
@@ -173,10 +132,8 @@ def resume_training_state(
     trainer.reset_rollout_state()
 
     if trainer.total_environment_steps > algorithm_config.total_timesteps:
-        raise ValueError(
-            "Checkpoint step exceeds the requested total timesteps: "
-            f"{trainer.total_environment_steps:,} > {algorithm_config.total_timesteps:,}."
-        )
+        raise ValueError(f"Checkpoint step exceeds the requested total timesteps: "
+                         f"{trainer.total_environment_steps:,} > {algorithm_config.total_timesteps:,}.")
 
     rng_state = checkpoint["rng_state"]
     random.setstate(rng_state["python"])
@@ -185,43 +142,38 @@ def resume_training_state(
     if "torch_cuda" in rng_state and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(rng_state["torch_cuda"])
 
+    # The next env.reset() moves every copy to a new episode. With another
+    # --num_envs, every copy continues past all saved episodes.
+    env_seeds = checkpoint["env_seeds"]
+    if len(env_seeds) != env.num_envs:
+        env_seeds = [max(env_seeds) + 1 + rank for rank in range(env.num_envs)]
+    for rank, seed in enumerate(env_seeds):
+        env.set_attr("seed", seed, indices=rank)
+
     print(f"Resuming training from: {path}")
-    print(
-        "Restored training step: "
-        f"{trainer.total_environment_steps:,} / {algorithm_config.total_timesteps:,}"
-    )
+    print(f"Restored training step: {trainer.total_environment_steps:,} / {algorithm_config.total_timesteps:,}")
     return float(checkpoint["best_eval_reward"])
 
 
-def _check_compatible(
-    saved_environment: Dict[str, Any],
-    saved_algorithm: Dict[str, Any],
-    environment_config: Dict[str, Any],
-    algorithm_config: HierarchicalConfig,
-) -> None:
+def _check_compatible(saved_environment: Dict[str, Any], saved_algorithm: Dict[str, Any],
+                      environment_config: Dict[str, Any], algorithm_config: HierarchicalConfig) -> None:
 
     def normalized(value):
-        # JSON round trip: tuples vs lists, key order.
-        return json.loads(json.dumps(value, sort_keys=True))
+        return json.loads(json.dumps(value, sort_keys=True))  # tuples vs lists, key order
 
     saved, current = normalized(saved_environment), normalized(environment_config)
-    if saved != current:
-        differences = ", ".join(
-            f"{key}: checkpoint={saved.get(key)!r}, now={current.get(key)!r}"
-            for key in sorted(saved.keys() | current.keys())
-            if saved.get(key) != current.get(key)
-        )
-        raise ValueError(
-            "Latest checkpoint uses a different environment configuration "
-            f"({differences}). Use the original --size/--seed/--[no-]reward_norm/"
-            "--[no-]reward_clip settings or pass --fresh."
-        )
+    differences = [f"{key}: checkpoint={saved.get(key)!r}, now={current.get(key)!r}"
+                   for key in sorted(saved.keys() | current.keys()) if saved.get(key) != current.get(key)]
+    if differences:
+        raise ValueError(f"Latest checkpoint uses a different environment configuration ({', '.join(differences)}). "
+                         "Use the original --size/--seed/--[no-]reward_norm/--[no-]reward_clip settings or pass --fresh.")
 
     def signature(algorithm: Dict[str, Any]) -> Dict[str, Any]:
         return {k: v for k, v in normalized(algorithm).items() if k not in _RESUMABLE_ALGORITHM_KEYS}
 
+    # A checkpoint from before a HierarchicalConfig field existed has that
+    # field's default.
+    saved_algorithm = HierarchicalConfig(**saved_algorithm).to_dict()
     if signature(saved_algorithm) != signature(algorithm_config.to_dict()):
-        raise ValueError(
-            "Latest checkpoint uses incompatible model/training settings. "
-            "Use the original settings or pass --fresh."
-        )
+        raise ValueError("Latest checkpoint uses incompatible model/training settings. "
+                         "Use the original settings or pass --fresh.")

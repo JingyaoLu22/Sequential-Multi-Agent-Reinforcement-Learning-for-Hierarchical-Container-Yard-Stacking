@@ -115,7 +115,7 @@ python -m stack.run_sequential_hppo --size small_with_margin --seed 1 \
 
 The size selects the environment and its training profile (Small / Medium / Large / Massive); every hyperparameter can be overridden from the CLI. The environment, including `reward_norm` / `reward_clip`, comes from the same `set_config()` as `stack/run.py`, so both pipelines train on the same rewards for the same `--size`; change them only explicitly with `--[no-]reward_norm` / `--[no-]reward_clip`. The run directory receives `best_*` / `final_*` models and `training_logs/` (evaluation curve, `evaluations.csv`, `rollouts.csv`); W&B gets every statistic unless `--no_wandb`. `--profile` adds per-phase timings (it synchronizes CUDA, so it is off by default).
 
-Plot several seeds together with `python -m stack.training_plots --hrl_dirs <run>/s1 <run>/s2 <run>/s3`, and add them to the Flat / HRL / rule-based comparison with `stack/plots.py`'s `evaluate(..., sequential_model_dir=<run>)`; run the comparison from the repo root with `python -m stack.plots`.
+Plot several seeds together with `python -m stack.training_plots --sequential_dirs <run>/s1 <run>/s2 <run>/s3` (optionally with `--hrl_dirs` / `--flat_dirs` runs that have an `evaluations.csv`), and add them to the Flat / HRL / rule-based comparison with `stack/plots.py`'s `evaluate(..., sequential_model_dir=<run>)`; run the comparison from the repo root with `python -m stack.plots`.
 
 #### Evaluation
 
@@ -124,11 +124,11 @@ python -m stack.evaluation.evaluate --model_dir ./models_trained/sequential_hppo
     --prefix best --episodes 100 --seed 1000 --output_dir ./evaluation_results/small_s1
 ```
 
-Episode `i` uses seed `--seed + i`. Training-time evaluation and this script use the same reward scale (raw rewards by default, `--eval_use_training_rewards` for the training scale in both), so the numbers are directly comparable.
+Episode `i` uses seed `--seed + i`. `reward_norm` / `reward_clip` only shape the training reward: every evaluation (periodic during training, this script and the `plots.py` comparison) reports raw rewards, so all numbers are directly comparable.
 
 #### Resume
 
-Re-run the same training command: if `--save_dir` contains `latest_training_state.pt`, training continues from it, including optimizer states, step counters, best evaluation reward and RNG states. `--timesteps`, the evaluation and checkpoint frequencies and `--num_envs` may change; a checkpoint with a different environment or model/training settings is refused, naming the mismatching keys. `--fresh` starts over and ignores the checkpoint.
+Re-run the same training command: if `--save_dir` contains `latest_training_state.pt`, training continues from it, including optimizer states, step counters, best evaluation reward, RNG states and each environment's episode seed (the in-progress episodes are dropped; training continues with new episodes). `--timesteps`, the evaluation and checkpoint frequencies and `--num_envs` may change; a checkpoint with a different environment or model/training settings is refused, naming the mismatching keys. `--fresh` starts over and ignores the checkpoint.
 
 All options: `python -m stack.run_sequential_hppo --help` and `python -m stack.evaluation.evaluate --help`.
 

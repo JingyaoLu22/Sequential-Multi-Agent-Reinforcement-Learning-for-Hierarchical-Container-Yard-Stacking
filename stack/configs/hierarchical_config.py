@@ -17,6 +17,9 @@ from .environments import ENVIRONMENT_SIZES
 @dataclass(frozen=True)
 class HierarchicalConfig:
 
+    # Name of the TRAINING_PROFILES entry the fields below come from.
+    training_profile: str
+
     # Set by the size's training profile (TRAINING_PROFILES).
     total_timesteps: int
     learning_rate: float
@@ -49,57 +52,39 @@ class HierarchicalConfig:
     max_grad_norm: float = 0.5
     normalize_advantage: bool = True
 
+    # Schedules and early stopping; None keeps the old behavior. The
+    # learning rate (all three optimizers) and ent_coef decay linearly to
+    # these values at total_timesteps. target_kl stops an actor's update
+    # once a minibatch's approx KL exceeds 1.5 * target_kl (as in SB3).
+    final_learning_rate: Optional[float] = None
+    final_ent_coef: Optional[float] = None
+    target_kl: Optional[float] = None
+
     # Periodic evaluation during training.
     eval_freq: int = 25_000
     n_eval_episodes: int = 10
 
-    # Profile the config was built from; "custom" for checkpoints saved
-    # before this field existed.
-    training_profile: str = "custom"
+    def _fields(self, *names: str) -> Dict[str, Any]:
+        return {name: getattr(self, name) for name in names}
+
+    def _encoder_kwargs(self) -> Dict[str, Any]:
+        """TransformerFeaturesExtractor settings shared by both actors and the critic."""
+        return self._fields("embed_dim", "n_heads", "n_layers", "dropout",
+                            "include_container_in_encoder", "container_start", "container_dim")
 
     def actor_kwargs(self) -> Dict[str, Any]:
         """PointerActor arguments shared by the Bay and Row actors."""
-
-        return dict(
-            embed_dim=self.embed_dim,
-            n_heads=self.n_heads,
-            n_layers=self.n_layers,
-            dropout=self.dropout,
-            tanh_clipping=self.tanh_clipping,
-            include_container_in_encoder=self.include_container_in_encoder,
-            container_start=self.container_start,
-            container_dim=self.container_dim,
-        )
+        return {**self._encoder_kwargs(), **self._fields("tanh_clipping")}
 
     def critic_kwargs(self) -> Dict[str, Any]:
         """CentralizedCritic arguments."""
-
-        return dict(
-            embed_dim=self.embed_dim,
-            n_heads=self.n_heads,
-            n_layers=self.n_layers,
-            dropout=self.dropout,
-            vf_dim=self.vf_dim,
-            include_container_in_encoder=self.include_container_in_encoder,
-            container_start=self.container_start,
-            container_dim=self.container_dim,
-        )
+        return {**self._encoder_kwargs(), **self._fields("vf_dim")}
 
     def trainer_kwargs(self) -> Dict[str, Any]:
         """SequentialPPOTrainer hyperparameters."""
-
-        return dict(
-            learning_rate=self.learning_rate,
-            n_epochs=self.n_epochs,
-            batch_size=self.batch_size,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            clip_range=self.clip_range,
-            ent_coef=self.ent_coef,
-            vf_coef=self.vf_coef,
-            max_grad_norm=self.max_grad_norm,
-            normalize_advantage=self.normalize_advantage,
-        )
+        return self._fields("learning_rate", "n_epochs", "batch_size", "gamma", "gae_lambda", "clip_range",
+                            "ent_coef", "vf_coef", "max_grad_norm", "normalize_advantage", "total_timesteps",
+                            "final_learning_rate", "final_ent_coef", "target_kl")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

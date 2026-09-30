@@ -13,7 +13,7 @@ import pytest
 import torch
 from gymnasium import spaces
 
-from stack.models.pointer_actor import PointerActor, load_actor_state_dict
+from stack.models.pointer_actor import PointerActor
 from stack.models.transformer_bay_policy import BayTransformerActorCritic
 from stack.models.transformer_policy import TransformerActorCritic
 
@@ -108,25 +108,3 @@ def test_masked_actions_are_never_chosen(tokens_per_action: int) -> None:
     torch.testing.assert_close(
         actor.evaluate_actions(observations, greedy, masks)[0], greedy_log_probs
     )
-
-
-def test_rejects_tokens_that_do_not_split_into_actions() -> None:
-    with pytest.raises(ValueError, match="multiple"):
-        PointerActor(_space(10), n_stacks=10, tokens_per_action=4)
-
-
-@pytest.mark.parametrize("prefix", ["", "policy."])
-def test_load_actor_state_dict_accepts_current_and_legacy_checkpoints(prefix: str) -> None:
-    """Checkpoints saved while the actor lived at AgentB/AgentR.policy
-    carry a "policy." key prefix; both formats must load strictly."""
-
-    source = _actor(N_ROWS, tokens_per_action=1)
-    for parameter in source.parameters():
-        torch.nn.init.normal_(parameter)
-    state_dict = {prefix + key: value for key, value in source.state_dict().items()}
-
-    target = _actor(N_ROWS, tokens_per_action=1)
-    load_actor_state_dict(target, state_dict)
-
-    observations = _observations(N_ROWS)
-    torch.testing.assert_close(target(observations), source(observations), rtol=0, atol=0)

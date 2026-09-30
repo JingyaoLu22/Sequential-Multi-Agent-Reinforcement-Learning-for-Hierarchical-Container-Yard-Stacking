@@ -166,7 +166,7 @@ class JointRolloutBuffer:
 
     def rollout_batch(self) -> RolloutBatch:
         """Flattened views (no copy) of the stored rollout; valid until
-        the next reset()/add()."""
+        the next reset()/add_batch()."""
 
         def flat(tensor: torch.Tensor) -> torch.Tensor:
             return tensor[: self.step].reshape(len(self), *tensor.shape[2:])

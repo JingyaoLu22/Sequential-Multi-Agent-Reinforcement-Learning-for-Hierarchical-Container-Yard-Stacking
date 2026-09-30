@@ -3,10 +3,7 @@ The environment sizes and their StackEnv configurations.
 
 This is the single definition that every entry point imports: the
 baselines (run.py, plots.py) and Sequential HPPO training and
-evaluation. It only uses the standard library, so both the
-stack package (``stack.configs.environments``) and the script-style
-baseline modules under stack/ (``configs.environments``) import it
-directly.
+evaluation.
 """
 
 from __future__ import annotations

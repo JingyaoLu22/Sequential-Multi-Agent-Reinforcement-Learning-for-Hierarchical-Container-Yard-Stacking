@@ -1,13 +1,13 @@
 """
 training_plots.py
 -----------------
-Plot evaluation-reward training curves for flat and hierarchical RL
-seeds, fetched from wandb (plot_training_curves) or read from local
-evaluations.csv files (plot_csv_training_curves).
+Plot evaluation-reward training curves for flat RL, hierarchical RL
+and Sequential HPPO seeds, fetched from wandb (plot_training_curves) or
+read from local evaluations.csv files (plot_csv_training_curves).
 
-Usage (script):
-    python training_plots.py                      # the W&B example below
-    python -m stack.training_plots --hrl_dirs runs/s1 runs/s2 runs/s3 \
+Usage (from the repo root):
+    python -m stack.training_plots                # the W&B example below
+    python -m stack.training_plots --sequential_dirs runs/s1 runs/s2 runs/s3 \
         --display_name "Small (3x4x3)" --save_path runs/training_curves_3seeds
 """
 
@@ -22,8 +22,9 @@ ENTITY  = "aritrabancode-university-of-amsterdam"
 PROJECT = "stack-rl"
 
 # Colors matching plots.py
-FLAT_COLOR = "#59A14F"
-HRL_COLOR  = "#F28E2B"
+FLAT_COLOR       = "#59A14F"
+HRL_COLOR        = "#F28E2B"
+SEQUENTIAL_COLOR = "#E15759"
 
 PLOT_STYLE = {
     "font.family":        "serif",
@@ -293,7 +294,9 @@ def plot_training_curves(
 
 
 def plot_csv_training_curves(
-    hrl_run_dirs: Sequence,
+    *,
+    sequential_run_dirs: Sequence = (),
+    hrl_run_dirs: Sequence = (),
     flat_run_dirs: Sequence = (),
     env_name: str = "env",
     display_name: Optional[str] = None,
@@ -305,7 +308,8 @@ def plot_csv_training_curves(
 ):
     """
     Same plot as plot_training_curves(), from local runs: each entry is a
-    run directory (with training_logs/evaluations.csv) or a CSV path.
+    run directory (with training_logs/evaluations.csv) or a CSV path, one
+    per seed. Each non-empty group is one color in the legend.
     """
     label = display_name if display_name is not None else env_name
     if save_path is None:
@@ -314,11 +318,14 @@ def plot_csv_training_curves(
     groups = [
         (group_label, color, [load_csv_curve(source) for source in sources])
         for group_label, sources, color in [
-            ("Flat RL",           flat_run_dirs, FLAT_COLOR),
-            ("Hierarchical RL",   hrl_run_dirs,  HRL_COLOR),
+            ("Flat RL",           flat_run_dirs,       FLAT_COLOR),
+            ("Hierarchical RL",   hrl_run_dirs,        HRL_COLOR),
+            ("Sequential HPPO",   sequential_run_dirs, SEQUENTIAL_COLOR),
         ]
         if sources
     ]
+    if not groups:
+        raise ValueError("No run directories given.")
 
     return _plot_groups(groups, title or label, ema_alpha, n_points, save_path, show)
 
@@ -334,8 +341,10 @@ if __name__ == "__main__":
         description="Plot seed runs from their local evaluations.csv; "
                     "without run directories, plot the W&B example below."
     )
+    parser.add_argument("--sequential_dirs", nargs="+", default=[],
+                        help="Sequential HPPO run directories, one per seed.")
     parser.add_argument("--hrl_dirs", nargs="+", default=[],
-                        help="Hierarchical / Sequential HPPO run directories, one per seed.")
+                        help="Hierarchical RL run directories, one per seed.")
     parser.add_argument("--flat_dirs", nargs="+", default=[],
                         help="Flat RL run directories, one per seed.")
     parser.add_argument("--display_name")
@@ -344,10 +353,11 @@ if __name__ == "__main__":
     parser.add_argument("--plot_points", type=int, default=500)
     args = parser.parse_args()
 
-    if args.hrl_dirs or args.flat_dirs:
+    if args.sequential_dirs or args.hrl_dirs or args.flat_dirs:
         plot_csv_training_curves(
-            args.hrl_dirs,
-            args.flat_dirs,
+            sequential_run_dirs=args.sequential_dirs,
+            hrl_run_dirs=args.hrl_dirs,
+            flat_run_dirs=args.flat_dirs,
             display_name=args.display_name,
             ema_alpha=args.ema_alpha,
             n_points=args.plot_points,

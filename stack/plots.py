@@ -20,6 +20,7 @@ from .evaluation.evaluate import (
     build_evaluation_system,
     evaluate_policy,
     load_checkpoint_config,
+    make_evaluation_config,
 )
 
 
@@ -98,8 +99,8 @@ def _evaluate_sequential_hppo(config_dict, run_dir, num_seeds):
     bay_actor, row_actor = build_evaluation_system(
         environment_config=config_dict,
         algorithm_config=algorithm_config,
-        agent_b_path=run_dir / "best_agent_b.pt",
-        agent_r_path=run_dir / "best_agent_r.pt",
+        bay_actor_path=run_dir / "best_bay_actor.pt",
+        row_actor_path=run_dir / "best_row_actor.pt",
         device=torch.device(get_device()),
     )
     episodes, _ = evaluate_policy(
@@ -169,8 +170,12 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
     sequential_model_dir : str or None
         Base path containing the s1/, s2/, s3/ Sequential HPPO runs (each a
         run_sequential_hppo --save_dir), e.g. "models_trained/sequential_hppo_small".
-        Each run's best_agent_b.pt / best_agent_r.pt are evaluated.
+        Each run's best_bay_actor.pt / best_row_actor.pt are evaluated.
     """
+    # Every agent is evaluated on raw rewards, whatever reward_norm /
+    # reward_clip the given config (or a model's training) used.
+    config_dict = make_evaluation_config(config_dict)
+
     # Derive size label from model dir (e.g. "small", "medium", "large1")
     size_label = os.path.basename(os.path.normpath(flat_model_dir))
     results_dir = os.path.join("results", size_label)
@@ -288,7 +293,7 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir,
                 print(f"\n[{model_num}/{n_models}] LOADING SEQUENTIAL HPPO (S{seed_idx}) from existing {npy_path}")
                 rewards = np.load(npy_path)
             else:
-                if not os.path.exists(os.path.join(run_dir, "best_agent_b.pt")):
+                if not os.path.exists(os.path.join(run_dir, "best_bay_actor.pt")):
                     print(f"\n[{model_num}/{n_models}] SKIPPING SEQUENTIAL HPPO (S{seed_idx}) — model not found: {run_dir}")
                     continue
                 print(f"\n{'=' * 70}")
@@ -442,7 +447,8 @@ if __name__ == "__main__":
 
     FLAT_MODEL_DIR = "stack/models/flat/pointer/large4"
     HRL_MODEL_DIR = "stack/models/hierarchical/pointer/large4"
-    # Seeds 1-3 of --size large_v4_with_margin in s1/, s2/, s3/
+    # Seeds 1-3 of `--size large_v4_with_margin --random_group_sizes` (the
+    # config_dict above) in s1/, s2/, s3/
     SEQUENTIAL_MODEL_DIR = "models_trained/sequential_hppo_large_v4"
     NUM_SEEDS = 100
     MAX_STEPS = 500

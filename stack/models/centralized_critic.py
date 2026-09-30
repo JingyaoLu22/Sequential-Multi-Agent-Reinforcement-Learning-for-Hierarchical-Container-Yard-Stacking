@@ -31,17 +31,9 @@ class CentralizedCritic(nn.Module):
         container_dim: int = 1,
     ) -> None:
         super().__init__()
-        if not isinstance(observation_space, spaces.Box):
-            raise TypeError("CentralizedCritic requires a Box observation space.")
-        if n_stacks <= 0 or embed_dim <= 0 or vf_dim <= 0:
-            raise ValueError("n_stacks, embed_dim, and vf_dim must be positive.")
-        if container_dim <= 0:
-            raise ValueError("container_dim must be positive.")
 
         self.n_stacks = n_stacks
         self.embed_dim = embed_dim
-        self.container_dim = container_dim
-        self._enc_size = n_stacks * embed_dim
 
         self.encoder = TransformerFeaturesExtractor(
             observation_space=observation_space,
@@ -58,43 +50,13 @@ class CentralizedCritic(nn.Module):
         self.critic_head = nn.Sequential(nn.Linear(embed_dim, vf_dim), nn.ReLU())
         self.value_head = nn.Linear(vf_dim, 1)
 
-    def _split_features(
-        self, features: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Split extractor output into stack embeddings and context."""
-        if features.ndim != 2:
-            raise ValueError(f"Expected encoded features (B, F), got {features.shape}.")
-        stack_features = features[:, : self._enc_size].reshape(
-            -1, self.n_stacks, self.embed_dim
-        )
-        container_features = features[:, self._enc_size :]
-        if container_features.shape[-1] != self.container_dim:
-            raise RuntimeError(
-                f"Expected {self.container_dim} container features, "
-                f"got {container_features.shape[-1]}."
-            )
-        return stack_features, container_features
-
-    def forward_latent(self, global_states: torch.Tensor) -> torch.Tensor:
-        """Return the critic hidden representation with shape ``(B, vf_dim)``."""
-        if global_states.ndim == 1:
-            global_states = global_states.unsqueeze(0)
-        if global_states.ndim != 2:
-            raise ValueError(
-                f"Global states must have shape (obs_dim,) or (B, obs_dim), "
-                f"got {global_states.shape}."
-            )
-        encoded = self.encoder(global_states.float())
-        stack_features, container_features = self._split_features(encoded)
-        pooled = stack_features.mean(dim=1)
-        context = self.critic_step_proj(container_features)
-        return self.critic_head(pooled + context)
-
     def forward(self, global_states: torch.Tensor) -> torch.Tensor:
-        """Return centralized values with shape ``(B,)``."""
-        return self.value_head(self.forward_latent(global_states)).squeeze(-1)
+        """Values (B,) of global states (B, obs_dim)."""
 
-    @torch.no_grad()
-    def predict_values(self, global_states: torch.Tensor) -> torch.Tensor:
-        """Return values without constructing an autograd graph."""
-        return self(global_states)
+        features = self.encoder(global_states)
+        enc_size = self.n_stacks * self.embed_dim
+
+        pooled = features[:, :enc_size].view(-1, self.n_stacks, self.embed_dim).mean(dim=1)
+        context = self.critic_step_proj(features[:, enc_size:])
+
+        return self.value_head(self.critic_head(pooled + context)).squeeze(-1)

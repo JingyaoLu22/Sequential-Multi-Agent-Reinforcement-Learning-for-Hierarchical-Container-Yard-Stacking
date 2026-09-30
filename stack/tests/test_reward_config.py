@@ -1,71 +1,41 @@
 """
-Reward settings come from the shared set_config() for every algorithm;
-only the explicit --[no-]reward_norm / --[no-]reward_clip flags change them.
+Reward settings come from the shared set_config(); only the explicit
+--[no-]reward_norm / --[no-]reward_clip flags change them, and they only
+shape the training reward: every evaluation reports raw rewards.
 """
 
-import argparse
+import torch
 
-import pytest
-
-from stack.configs.environments import add_reward_arguments, set_config
+from stack.configs.environments import set_config
+from stack.envs.stack_gym import StackEnv
+from stack.evaluation.evaluate import evaluate_policy, make_evaluation_config
 from stack.run_sequential_hppo import build_parser
+from stack.training.bay_row_layout import BayRowLayout
+
+from .common import environment
 
 
-def _parse(*argv):
-    parser = argparse.ArgumentParser()
-    add_reward_arguments(parser)
-    return parser.parse_args(list(argv))
+def test_reward_settings_change_only_through_explicit_flags() -> None:
+    def config(*flags):
+        args = build_parser().parse_args(["--size", "small_with_margin", *flags])
+        return set_config(args.size, 1, args.reward_norm, args.reward_clip)
+
+    # Without flags: exactly set_config(), i.e. what the baselines train on.
+    assert config() == set_config("small_with_margin", 1)
+    assert (config()["reward_norm"], config()["reward_clip"]) == (False, False)
+    assert (config("--reward_norm")["reward_norm"], config("--reward_norm")["reward_clip"]) == (True, False)
 
 
-def test_small_with_margin_default_is_unnormalized_and_unclipped() -> None:
-    config = set_config("small_with_margin", seed=1)
-    assert (config["reward_norm"], config["reward_clip"]) == (False, False)
+def test_evaluation_always_uses_raw_rewards() -> None:
+    training_config = environment(reward_norm=True, reward_clip=True)
+    assert make_evaluation_config(training_config) == environment(reward_norm=False, reward_clip=False)
+    assert training_config["reward_norm"] and training_config["reward_clip"]  # never modified
 
-
-def test_flags_default_to_the_size_config() -> None:
-    args = _parse()
-    assert (args.reward_norm, args.reward_clip) == (None, None)
-    assert set_config("small_with_margin", 1, args.reward_norm, args.reward_clip) == set_config(
-        "small_with_margin", 1
-    )
-
-
-@pytest.mark.parametrize(
-    "argv,expected",
-    [
-        (("--reward_norm", "--reward_clip"), (True, True)),
-        (("--no-reward_norm",), (False, None)),
-        (("--reward_clip",), (None, True)),
-    ],
-)
-def test_explicit_flags_override_either_way(argv, expected) -> None:
-    args = _parse(*argv)
-    assert (args.reward_norm, args.reward_clip) == expected
-
-    config = set_config("medium_with_margin", 1, args.reward_norm, args.reward_clip)
-    default = set_config("medium_with_margin", 1)
-    for name, value in zip(("reward_norm", "reward_clip"), expected):
-        assert config[name] == (default[name] if value is None else value)
-
-
-def test_sequential_hppo_cli_exposes_the_shared_flags() -> None:
-    args = build_parser().parse_args(["--size", "small_with_margin", "--reward_norm"])
-    assert (args.reward_norm, args.reward_clip) == (True, None)
-
-
-def test_training_and_standalone_evaluation_share_reward_scale() -> None:
-    from stack.evaluation.evaluate import build_parser as build_evaluation_parser
-    from stack.evaluation.evaluate import make_evaluation_config
-
-    training_config = set_config("medium_with_margin", seed=1)
-    assert training_config["reward_norm"] and training_config["reward_clip"]
-
-    for extra, expected in (([], (False, False)), (["--eval_use_training_rewards"], (True, True))):
-        training_args = build_parser().parse_args(["--size", "medium_with_margin", *extra])
-        standalone_args = build_evaluation_parser().parse_args(["--model_dir", "unused", *extra])
-        assert training_args.eval_use_training_rewards == standalone_args.eval_use_training_rewards
-
-        config = make_evaluation_config(training_config, standalone_args.eval_use_training_rewards)
-        assert (config["reward_norm"], config["reward_clip"]) == expected
-        # The training run's own config is never modified.
-        assert training_config["reward_norm"] and training_config["reward_clip"]
+    # evaluate_policy reports raw rewards even when handed the training config.
+    torch.manual_seed(0)
+    actors = BayRowLayout.from_env(StackEnv(config=training_config)).build_actors(
+        embed_dim=16, n_heads=2, n_layers=1, dropout=0.0)
+    totals = [[e.total_reward for e in evaluate_policy(environment_config=config, bay_actor=actors[0],
+                                                       row_actor=actors[1], n_episodes=4, verbose=False)[0]]
+              for config in (training_config, environment(reward_norm=False, reward_clip=False))]
+    assert totals[0] == totals[1]

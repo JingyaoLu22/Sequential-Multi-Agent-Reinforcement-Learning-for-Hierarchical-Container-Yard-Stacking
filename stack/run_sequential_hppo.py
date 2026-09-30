@@ -38,11 +38,7 @@ from .configs.hierarchical_config import (
     get_hierarchical_config,
 )
 from .envs.stack_gym import StackEnv
-from .evaluation.evaluate import (
-    add_evaluation_reward_argument,
-    evaluate_policy,
-    make_evaluation_config,
-)
+from .evaluation.evaluate import evaluate_policy, make_evaluation_config
 from .models.centralized_critic import CentralizedCritic
 from .training.bay_row_layout import BayRowLayout
 from .training.checkpoint import (
@@ -65,6 +61,10 @@ ROLLOUT_CSV_COLUMNS = [
     "critic_loss",
     "bay_policy_loss",
     "row_policy_loss",
+    "bay_approx_kl",
+    "row_approx_kl",
+    "learning_rate",
+    "ent_coef",
     "steps_per_second",
 ]
 EVALUATION_CSV_COLUMNS = [
@@ -88,6 +88,9 @@ _CONFIG_OVERRIDES = {
     "checkpoint_freq": "checkpoint_freq",
     "eval_freq": "eval_freq",
     "n_eval_episodes": "n_eval_episodes",
+    "final_learning_rate": "final_learning_rate",
+    "final_ent_coef": "final_ent_coef",
+    "target_kl": "target_kl",
 }
 
 
@@ -212,7 +215,7 @@ def main(args: argparse.Namespace) -> None:
     best_eval_reward = float("-inf")
     resumed = not args.fresh and (save_dir / LATEST_TRAINING_STATE_FILENAME).exists()
     if resumed:
-        best_eval_reward = resume_training_state(save_dir, trainer, environment_config, algorithm_config)
+        best_eval_reward = resume_training_state(save_dir, trainer, env, environment_config, algorithm_config)
     elif args.fresh:
         print("Fresh training explicitly requested; existing checkpoints will not be loaded.")
     else:
@@ -225,7 +228,9 @@ def main(args: argparse.Namespace) -> None:
         f"profile {algorithm_config.training_profile}: lr {algorithm_config.learning_rate}, "
         f"buffer {algorithm_config.buffer_size}, batch {algorithm_config.batch_size}, "
         f"epochs {algorithm_config.n_epochs}, clip {algorithm_config.clip_range}, "
-        f"ent {algorithm_config.ent_coef} | {algorithm_config.total_timesteps:,} steps, "
+        f"ent {algorithm_config.ent_coef} | final lr {algorithm_config.final_learning_rate}, "
+        f"final ent {algorithm_config.final_ent_coef}, target_kl {algorithm_config.target_kl} | "
+        f"{algorithm_config.total_timesteps:,} steps, "
         f"checkpoint every {algorithm_config.checkpoint_freq:,}"
     )
 
@@ -233,7 +238,8 @@ def main(args: argparse.Namespace) -> None:
     # Periodic evaluation and logs
     # ------------------------------------------------------------------
 
-    evaluation_config = make_evaluation_config(environment_config, args.eval_use_training_rewards)
+    # Training may use normalized/clipped rewards; evaluation always reports raw rewards.
+    evaluation_config = make_evaluation_config(environment_config)
     evaluation_config["seed"] = args.eval_seed
     yard_label = "x".join(str(x) for x in environment_config["yard_shape"])
     display_name = f"{args.size.replace('_', ' ').title()} (yard {yard_label})"
@@ -250,7 +256,7 @@ def main(args: argparse.Namespace) -> None:
     if not args.no_eval:
         print(
             f"Evaluation: every {algorithm_config.eval_freq:,} training steps, "
-            f"{algorithm_config.n_eval_episodes} episodes, seed mode {args.eval_seed_mode} from "
+            f"{algorithm_config.n_eval_episodes} episodes, a new seed block each time from "
             f"{args.eval_seed}, reward_norm={evaluation_config['reward_norm']}, "
             f"reward_clip={evaluation_config['reward_clip']}"
         )
@@ -259,10 +265,8 @@ def main(args: argparse.Namespace) -> None:
         nonlocal best_eval_reward
         step = trainer.total_environment_steps
         evaluation_index = evaluation_log.n_rows
-        # "rolling": every evaluation gets a new block of episode seeds.
-        base_seed = args.eval_seed + (
-            evaluation_index * algorithm_config.n_eval_episodes if args.eval_seed_mode == "rolling" else 0
-        )
+        # Every evaluation gets a new block of episode seeds.
+        base_seed = args.eval_seed + evaluation_index * algorithm_config.n_eval_episodes
         # Deterministic evaluation uses its own environments and leaves
         # every global RNG untouched, so it cannot change training.
         _episodes, summary = evaluate_policy(
@@ -301,14 +305,13 @@ def main(args: argparse.Namespace) -> None:
                     "evaluation_index": evaluation_index,
                     "base_seed": base_seed,
                     "last_seed": last_seed,
-                    "seed_mode": args.eval_seed_mode,
                     **summary.to_dict(),
                 }, indent=2), encoding="utf-8")
 
         if not args.no_training_plots:
             try:
                 fig, _ = plot_csv_training_curves(
-                    [evaluation_log.path],
+                    sequential_run_dirs=[evaluation_log.path],
                     display_name=display_name,
                     ema_alpha=args.ema_alpha,
                     n_points=args.plot_points,
@@ -341,7 +344,6 @@ def main(args: argparse.Namespace) -> None:
                 "seed": args.seed,
                 "architecture": "sequential_multi_agent_ppo",
                 "evaluation_initial_base_seed": args.eval_seed,
-                "evaluation_seed_mode": args.eval_seed_mode,
                 "evaluation_at_step_zero": False,
             },
         )
@@ -392,7 +394,7 @@ def main(args: argparse.Namespace) -> None:
 
             if args.save_model and trainer.total_environment_steps >= next_checkpoint:
                 with profiler.region("checkpoint_seconds"):
-                    save_training_state(save_dir, trainer, environment_config, algorithm_config, best_eval_reward)
+                    save_training_state(save_dir, trainer, env, environment_config, algorithm_config, best_eval_reward)
                 next_checkpoint = next_multiple(algorithm_config.checkpoint_freq)
 
             # With --profile, the same columns on every row whether or not
@@ -410,7 +412,7 @@ def main(args: argparse.Namespace) -> None:
 
         if args.save_model:
             save_models(save_dir, trainer, environment_config, algorithm_config, prefix="final")
-            save_training_state(save_dir, trainer, environment_config, algorithm_config, best_eval_reward)
+            save_training_state(save_dir, trainer, env, environment_config, algorithm_config, best_eval_reward)
 
     finally:
         env.close()
@@ -452,6 +454,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning_rate", type=float)
     parser.add_argument("--clip_range", type=float)
     parser.add_argument("--ent_coef", type=float)
+    parser.add_argument("--final_learning_rate", type=float,
+                        help="Decay the learning rate linearly to this value at the last timestep "
+                             "(default: constant).")
+    parser.add_argument("--final_ent_coef", type=float,
+                        help="Decay ent_coef linearly to this value at the last timestep (default: constant).")
+    parser.add_argument("--target_kl", type=float,
+                        help="Stop an actor's PPO update once a minibatch's approx KL exceeds "
+                             "1.5 * target_kl (default: off).")
     parser.add_argument("--checkpoint_freq", type=int,
                         help="Environment steps between overwrites of latest_training_state.pt.")
 
@@ -462,12 +472,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval_batch_size", type=int,
                         help="Episodes evaluated simultaneously (default 8); does not change results.")
     parser.add_argument("--eval_seed", type=int, default=100_000,
-                        help="First evaluation episode seed; independent of the training seed.")
-    parser.add_argument("--eval_seed_mode", choices=["rolling", "fixed"], default="rolling",
-                        help="'rolling': a new seed block per evaluation; 'fixed': always the first.")
+                        help="First evaluation episode seed, independent of the training seed; evaluation k "
+                             "uses the next block of seeds, eval_seed + k * n_eval_episodes onwards.")
     parser.add_argument("--no_eval", action="store_true",
                         help="Disable periodic evaluation; rollouts.csv is still written.")
-    add_evaluation_reward_argument(parser)
 
     # Logging
     parser.add_argument("--ema_alpha", type=float, default=0.1,
