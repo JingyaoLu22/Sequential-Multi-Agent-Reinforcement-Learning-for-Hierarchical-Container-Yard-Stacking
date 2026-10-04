@@ -40,6 +40,15 @@ For training Flat RL model on small environments with all constraints (40 feet a
 uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --use_transformer --save_model --save_dir ./stack/models --save_filename ppo_joint_flat_small_imo40ft
 ```
 
+For training Sequential HPPO model (see [Sequential HPPO Update](#sequential-hppo-update)) on small environments with all constraints (40 feet and IMO) on :
+```
+uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --sequential_hppo --save_model --save_dir ./stack/models --save_filename ppo_sequential_hppo_small_imo40ft
+```
+
+### Sequential HPPO Update
+
+![Sequential HPPO update](stack/assets/sequential_hppo_update.png)
+
 ### Major Files Overview
 
 | File | Description |
@@ -51,6 +60,8 @@ uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 10000
 | `stack/agents/hierarchical_rule_based_agent.py` | Heuristic baseline agents for yard stacking. |
 | `stack/models/transformer_policy.py` | Transformer encoder and Pointer Network decoder implementation.|
 | `stack/models/joint_hierarchical_policy.py` | Code for Hierarchical RL policy |
+| `stack/models/sequential_hierarchical_policy.py` | Code for Sequential HPPO policy (bay actor, row actor, centralized critic) |
+| `stack/models/sequential_hppo.py` | Sequential HPPO algorithm: MaskablePPO with the sequential critic → bay actor → row actor update |
 
 ## Stow
 

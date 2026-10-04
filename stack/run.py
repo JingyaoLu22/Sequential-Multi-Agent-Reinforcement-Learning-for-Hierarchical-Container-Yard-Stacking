@@ -78,6 +78,7 @@ def main(args):
         low_level_model_path=args.low_level_model_path,
         joint_hierarchical=args.joint_hierarchical,
         hierarchical_diffobs=args.hierarchical_diffobs,
+        sequential_hppo=args.sequential_hppo,
     )
 
     if run is not None:
@@ -302,6 +303,12 @@ if __name__ == "__main__":
         "--hierarchical_diffobs",
         action="store_true",
         help="Train with differentiated observations: bay head sees bay-level features, stack head sees per-bay stack features. Only learns suboptimal policy.",
+    )
+    # sequential HPPO args
+    parser.add_argument(
+        "--sequential_hppo",
+        action="store_true",
+        help="Train separate bay and row actors with sequential (HAPPO-style) PPO updates. ent_coef defaults to 0.15, as for joint_hierarchical.",
     )
     parser.add_argument(
         "--random_group_sizes",

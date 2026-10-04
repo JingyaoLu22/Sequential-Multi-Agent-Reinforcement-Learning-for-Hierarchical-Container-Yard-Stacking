@@ -367,8 +367,8 @@ def set_config(size: str = "small", seed: int = 42) -> dict:
             "group_placement": "random",
             "seed": seed,
             "observation_type": "stack_features_v3",
-            "reward_norm": False,
-            "reward_clip": False,
+            "reward_norm": True,
+            "reward_clip": True,
             "stack_fill_penalty": True,
             "container_sizes": True,
             "enable_imo": True

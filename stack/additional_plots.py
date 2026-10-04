@@ -12,6 +12,7 @@ from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.common.wrappers import ActionMasker
 from utils import mask_fn
 from models.joint_hierarchical_policy import MaskableJointTransformerPolicy
+from models.sequential_hierarchical_policy import MaskableSequentialTransformerPolicy
 
 
 # ============================================================
@@ -22,6 +23,7 @@ COLORS = {
     "Heuristic Bay Grouping Agent": "#4C78A8",
     "Flat RL": "#59A14F",
     "Hierarchical RL": "#F28E2B",
+    "Sequential HPPO": "#E15759",
 }
 
 def _apply_plot_style():
@@ -282,18 +284,23 @@ def _evaluate_model(name, env_factory, get_action_fn, base_env_getter,
 # MAIN EVALUATE FUNCTION
 # ============================================================
 
-def evaluate_all(config_dict, flat_model_dir, hrl_model_dir,
+def evaluate_all(config_dict, flat_model_dir, hrl_model_dir, sequential_model_dir,
                  num_seeds=100, max_steps=500, mode="both",
-                 flat_seed=1, hrl_seed=1):
+                 flat_seed=1, hrl_seed=1, sequential_seed=1):
     """
-    Evaluate 5 models (3 rule-based + 1 flat RL + 1 HRL).
+    Evaluate 6 models (3 rule-based + 1 flat RL + 1 HRL + 1 Sequential HPPO).
 
     Parameters
     ----------
+    sequential_model_dir : str
+        Base path containing seed1/, seed2/, seed3/ for Sequential HPPO models,
+        e.g. "stack/models/sequential_hppo/pointer/small".
     flat_seed : int
         Seed index (1–3) to use for the flat RL model.
     hrl_seed : int
         Seed index (1–3) to use for the hierarchical RL model.
+    sequential_seed : int
+        Seed index (1–3) to use for the Sequential HPPO model.
     mode : str
         "robust"  — robustness analysis only (normal + perturbed rewards)
         "metrics" — bay uniformity + stacking strategy only
@@ -306,8 +313,8 @@ def evaluate_all(config_dict, flat_model_dir, hrl_model_dir,
     perturbation_steps = _compute_perturbation_steps(max_steps)
 
     print(f"\n{'#' * 70}")
-    print(f"ADDITIONAL ANALYSIS — mode={mode}, 5 models x {num_seeds} seeds")
-    print(f"Flat RL seed: {flat_seed} | HRL seed: {hrl_seed}")
+    print(f"ADDITIONAL ANALYSIS — mode={mode}, 6 models x {num_seeds} seeds")
+    print(f"Flat RL seed: {flat_seed} | HRL seed: {hrl_seed} | Sequential HPPO seed: {sequential_seed}")
     print(f"Perturbation steps: {perturbation_steps}")
     print(f"Results dir: {results_dir}/")
     print(f"{'#' * 70}")
@@ -324,7 +331,7 @@ def evaluate_all(config_dict, flat_model_dir, hrl_model_dir,
     for name, policy_type in rule_based_agents:
         model_num += 1
         print(f"\n{'=' * 70}")
-        print(f"[{model_num}/5] {name.upper()} — {mode}")
+        print(f"[{model_num}/6] {name.upper()} — {mode}")
         print(f"{'=' * 70}")
 
         agent = HierarchicalAgent(
@@ -358,11 +365,11 @@ def evaluate_all(config_dict, flat_model_dir, hrl_model_dir,
         model_num += 1
 
         if not os.path.exists(model_path + ".zip"):
-            print(f"\n[{model_num}/5] SKIPPING FLAT RL ({seed_dir.upper()}) — not found: {model_path}")
+            print(f"\n[{model_num}/6] SKIPPING FLAT RL ({seed_dir.upper()}) — not found: {model_path}")
             continue
 
         print(f"\n{'=' * 70}")
-        print(f"[{model_num}/5] FLAT RL ({seed_dir.upper()}) — {mode}")
+        print(f"[{model_num}/6] FLAT RL ({seed_dir.upper()}) — {mode}")
         print(f"  Loading: {model_path}")
         print(f"{'=' * 70}")
         model = MaskablePPO.load(model_path)
@@ -387,16 +394,48 @@ def evaluate_all(config_dict, flat_model_dir, hrl_model_dir,
         model_num += 1
 
         if not os.path.exists(model_path + ".zip"):
-            print(f"\n[{model_num}/5] SKIPPING HRL ({seed_dir.upper()}) — not found: {model_path}")
+            print(f"\n[{model_num}/6] SKIPPING HRL ({seed_dir.upper()}) — not found: {model_path}")
             continue
 
         print(f"\n{'=' * 70}")
-        print(f"[{model_num}/5] HRL ({seed_dir.upper()}) — {mode}")
+        print(f"[{model_num}/6] HRL ({seed_dir.upper()}) — {mode}")
         print(f"  Loading: {model_path}")
         print(f"{'=' * 70}")
         model = MaskablePPO.load(
             model_path,
             custom_objects={"policy_class": MaskableJointTransformerPolicy},
+        )
+        action_fn = _make_rl_action_fn(model)
+
+        def env_factory(_cfg=rl_config):
+            base = StackEnv(config=_cfg, render_mode=None)
+            wrapped = ActionMasker(base, mask_fn)
+            return wrapped, base
+
+        _evaluate_model(name, env_factory, action_fn, None,
+                        num_seeds, max_steps, yard_shape, mode,
+                        results_dir, perturbation_steps)
+
+    # ── 4. Sequential HPPO model ──
+    seq_dir_name = os.path.basename(os.path.normpath(sequential_model_dir))
+    for seed_idx in [sequential_seed]:
+        seed_dir = f"seed{seed_idx}"
+        run_name = f"sequential_hppo_pointer_{seq_dir_name}_{seed_dir}"
+        model_path = os.path.join(sequential_model_dir, seed_dir, run_name, "best_model")
+        name = f"sequential_hppo_{seed_dir}"
+        model_num += 1
+
+        if not os.path.exists(model_path + ".zip"):
+            print(f"\n[{model_num}/6] SKIPPING SEQUENTIAL HPPO ({seed_dir.upper()}) — not found: {model_path}")
+            continue
+
+        print(f"\n{'=' * 70}")
+        print(f"[{model_num}/6] SEQUENTIAL HPPO ({seed_dir.upper()}) — {mode}")
+        print(f"  Loading: {model_path}")
+        print(f"{'=' * 70}")
+        model = MaskablePPO.load(
+            model_path,
+            custom_objects={"policy_class": MaskableSequentialTransformerPolicy},
         )
         action_fn = _make_rl_action_fn(model)
 
@@ -458,14 +497,14 @@ def _pick_best_seeds(results_dir, mode):
 # ============================================================
 
 def plot_robustness_kde(results_dir, num_seeds, title_env_label="Environment",
-                        flat_seed=1, hrl_seed=1):
+                        flat_seed=1, hrl_seed=1, sequential_seed=1):
     """KDE overlay: normal (solid) vs perturbed (dashed) per model."""
     _apply_plot_style()
     print(f"\n{'=' * 70}")
     print(f"GENERATING ROBUSTNESS KDE PLOT")
     print(f"{'=' * 70}")
 
-    # Only Heuristic Bay Grouping Agent vs Joint Hierarchical RL
+    # Heuristic Bay Grouping Agent vs Joint Hierarchical RL vs Sequential HPPO
     agents = {}
     nr = os.path.join(results_dir, "rule_based_grouped_normal_rewards.npy")
     pr = os.path.join(results_dir, "rule_based_grouped_perturbed_rewards.npy")
@@ -477,6 +516,12 @@ def plot_robustness_kde(results_dir, num_seeds, title_env_label="Environment",
     pr = os.path.join(results_dir, f"{hrl_name}_perturbed_rewards.npy")
     if os.path.exists(nr) and os.path.exists(pr):
         agents["Hierarchical RL"] = (np.load(nr), np.load(pr))
+
+    seq_name = f"sequential_hppo_seed{sequential_seed}"
+    nr = os.path.join(results_dir, f"{seq_name}_normal_rewards.npy")
+    pr = os.path.join(results_dir, f"{seq_name}_perturbed_rewards.npy")
+    if os.path.exists(nr) and os.path.exists(pr):
+        agents["Sequential HPPO"] = (np.load(nr), np.load(pr))
 
     if not agents:
         print("  No robustness data found, skipping KDE plot.")
@@ -517,10 +562,10 @@ def plot_robustness_kde(results_dir, num_seeds, title_env_label="Environment",
 
 
 def plot_robustness_degradation(results_dir, num_seeds, title_env_label="Environment",
-                                flat_seed=1, hrl_seed=1):
+                                flat_seed=1, hrl_seed=1, sequential_seed=1):
     """
     Degradation bar chart: ΔR = mean(normal) − mean(perturbed) per model.
-    Only Heuristic Bay Grouping Agent vs Joint Hierarchical RL.
+    Heuristic Bay Grouping Agent vs Joint Hierarchical RL vs Sequential HPPO.
     """
     _apply_plot_style()
     print(f"\n{'=' * 70}")
@@ -538,6 +583,12 @@ def plot_robustness_degradation(results_dir, num_seeds, title_env_label="Environ
     pr = os.path.join(results_dir, f"{hrl_name}_perturbed_rewards.npy")
     if os.path.exists(nr) and os.path.exists(pr):
         labels_data.append(("Hierarchical RL", np.load(nr), np.load(pr)))
+
+    seq_name = f"sequential_hppo_seed{sequential_seed}"
+    nr = os.path.join(results_dir, f"{seq_name}_normal_rewards.npy")
+    pr = os.path.join(results_dir, f"{seq_name}_perturbed_rewards.npy")
+    if os.path.exists(nr) and os.path.exists(pr):
+        labels_data.append(("Sequential HPPO", np.load(nr), np.load(pr)))
 
     if not labels_data:
         print("  No robustness data found, skipping degradation plot.")
@@ -581,9 +632,9 @@ def plot_robustness_degradation(results_dir, num_seeds, title_env_label="Environ
 # ============================================================
 
 def plot_bay_uniformity(results_dir, num_seeds, title_env_label="Environment",
-                        flat_seed=1, hrl_seed=1):
+                        flat_seed=1, hrl_seed=1, sequential_seed=1):
     """
-    2-pane per-bay plot: Flat RL (left) | Joint Hierarchical RL (right).
+    3-pane per-bay plot: Flat RL (left) | Joint Hierarchical RL (middle) | Sequential HPPO (right).
     Bay 1 (first physical bay): alpha=1.0, linewidth=3.0.
     Other bays: alpha=0.45, linewidth=3.0.
     Handles 6 and 10 bays.
@@ -608,9 +659,10 @@ def plot_bay_uniformity(results_dir, num_seeds, title_env_label="Environment",
     panel_specs = [
         ("Flat RL",          flat_seed, "flat"),
         ("Hierarchical RL",  hrl_seed,  "hrl"),
+        ("Sequential HPPO",  sequential_seed, "sequential_hppo"),
     ]
 
-    fig, axes = plt.subplots(1, 2, figsize=(14.0, 5.0), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(21.0, 5.0), sharey=True)
 
     num_bays_ref = None
     odd_bays_ref = None
@@ -687,7 +739,7 @@ def plot_bay_uniformity(results_dir, num_seeds, title_env_label="Environment",
 # ============================================================
 
 def plot_partial_stacks(results_dir, num_seeds, title_env_label="Environment",
-                        flat_seed=1, hrl_seed=1):
+                        flat_seed=1, hrl_seed=1, sequential_seed=1):
     """Line plot: step vs mean partial-stack count ± 1 std."""
     _apply_plot_style()
     print(f"\n{'=' * 70}")
@@ -705,6 +757,10 @@ def plot_partial_stacks(results_dir, num_seeds, title_env_label="Environment",
         path = os.path.join(results_dir, f"{name}_partial_stacks.npy")
         if os.path.exists(path):
             agents[label] = np.load(path)
+
+    path = os.path.join(results_dir, f"sequential_hppo_seed{sequential_seed}_partial_stacks.npy")
+    if os.path.exists(path):
+        agents["Sequential HPPO"] = np.load(path)
 
     if not agents:
         print("  No metrics data found, skipping partial stacks plot.")
@@ -772,10 +828,12 @@ if __name__ == "__main__":
 
     FLAT_MODEL_DIR = "stack/models/flat/pointer/large4"
     HRL_MODEL_DIR = "stack/models/hierarchical/pointer/large4"
+    SEQUENTIAL_MODEL_DIR = "stack/models/sequential_hppo/pointer/large4"
     NUM_SEEDS = 100
     MAX_STEPS = 500
     FLAT_SEED = 2   # which seed (1-3) to use for flat RL
     HRL_SEED = 3    # which seed (1-3) to use for hierarchical RL
+    SEQUENTIAL_SEED = 1   # which seed (1-3) to use for Sequential HPPO
 
     # Derive env label from model directory: large1 → "Large", large4 → "Massive"
     _dir_lower = FLAT_MODEL_DIR.lower()
@@ -790,17 +848,19 @@ if __name__ == "__main__":
         config_dict,
         flat_model_dir=FLAT_MODEL_DIR,
         hrl_model_dir=HRL_MODEL_DIR,
+        sequential_model_dir=SEQUENTIAL_MODEL_DIR,
         num_seeds=NUM_SEEDS,
         max_steps=MAX_STEPS,
         mode=args.mode,
         flat_seed=FLAT_SEED,
         hrl_seed=HRL_SEED,
+        sequential_seed=SEQUENTIAL_SEED,
     )
 
     if args.mode in ("robust", "both"):
-        plot_robustness_kde(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED)
-        plot_robustness_degradation(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED)
+        plot_robustness_kde(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED, SEQUENTIAL_SEED)
+        plot_robustness_degradation(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED, SEQUENTIAL_SEED)
 
     if args.mode in ("metrics", "both"):
-        plot_bay_uniformity(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED)
-        plot_partial_stacks(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED)
+        plot_bay_uniformity(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED, SEQUENTIAL_SEED)
+        plot_partial_stacks(results_dir, NUM_SEEDS, TITLE_LABEL, FLAT_SEED, HRL_SEED, SEQUENTIAL_SEED)

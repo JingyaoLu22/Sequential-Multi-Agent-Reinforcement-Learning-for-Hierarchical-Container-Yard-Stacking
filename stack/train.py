@@ -37,6 +37,8 @@ from models.joint_hierarchical_policy import (
     MaskableJointTransformerPolicy,
 )
 from models.joint_diffobs_policy import MaskableDiffObsJointTransformerPolicy
+from models.sequential_hierarchical_policy import MaskableSequentialTransformerPolicy
+from models.sequential_hppo import SequentialHPPO
 
 
 def create_env(
@@ -242,6 +244,7 @@ def create_model(
     joint_hierarchical: bool = False,
     hierarchical_diffobs: bool = False,
     group_num: int | None = None,
+    sequential_hppo: bool = False,
 ) -> MaskablePPO:
     """
     Instantiate a MaskablePPO agent for the stowage stack environment.
@@ -284,6 +287,7 @@ def create_model(
         joint_hierarchical (bool): Whether to use a joint hierarchical policy.
         hierarchical_diffobs (bool): Whether to use a differentiated observation hierarchical policy (currently not working).
         group_num (int | None): Number of container groups in the yard.
+        sequential_hppo (bool): Whether to use Sequential HPPO (separate bay actor, row actor and critic).
     Returns:
         Model : MaskablePPO agent model ready for training.
     """
@@ -303,7 +307,7 @@ def create_model(
 
     # Default entropy coefficient
     if ent_coef is None:
-        ent_coef = 0.15 if (joint_hierarchical or hierarchical_diffobs) else 0.3
+        ent_coef = 0.15 if (joint_hierarchical or hierarchical_diffobs or sequential_hppo) else 0.3
 
     
     if hierarchical_diffobs:
@@ -325,6 +329,21 @@ def create_model(
             n_layers=n_layers,
             vf_dim=vf_dim,
             tanh_clipping=tanh_clipping,
+        )
+    elif sequential_hppo:
+        # Sequential HPPO: separate bay actor, row actor and critic, updated one after another by SequentialHPPO.
+        n_bays = n_stacks // n_rows_per_bay
+        policy = MaskableSequentialTransformerPolicy
+        policy_kwargs = dict(
+            n_stacks=n_stacks,
+            n_bays=n_bays,
+            n_rows_per_bay=n_rows_per_bay,
+            embed_dim=embed_dim,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            vf_dim=vf_dim,
+            tanh_clipping=tanh_clipping,
+            **_container_kwargs,
         )
     elif joint_hierarchical:
         # Joint hierarchical policy: separate high-level and low-level policies for bay selection and stack selection.
@@ -391,7 +410,8 @@ def create_model(
     else:
         learning_rate = lr
 
-    model = MaskablePPO(
+    # SequentialHPPO is MaskablePPO with the Sequential HPPO train().
+    model = (SequentialHPPO if sequential_hppo else MaskablePPO)(
         policy=policy,
         env=train_env,
         learning_rate=learning_rate,
@@ -525,6 +545,7 @@ def train(
     low_level_model_path: str | None = None,
     joint_hierarchical: bool = False,
     hierarchical_diffobs: bool = False,
+    sequential_hppo: bool = False,
 ) -> None:
     """
     Training function.
@@ -566,6 +587,7 @@ def train(
         hierarchical_high_level (bool), low_level_agent_type (str), low_level_model_path (str | None): Used for sequential hierarchical training.
         joint_hierarchical (bool): Used for joint hierarchical policy for bay-level and stack-level selection.
         hierarchical_diffobs (bool): Used for differentiated observation hierarchical policy (currently not working).
+        sequential_hppo (bool): Train separate bay and row actors with sequential (HAPPO-style) PPO updates.
     """
     seed = config.get("seed", None)
 
@@ -618,6 +640,7 @@ def train(
         joint_hierarchical=joint_hierarchical,
         hierarchical_diffobs=hierarchical_diffobs,
         group_num=config.get("group_num", 3),
+        sequential_hppo=sequential_hppo,
     )
 
     # Initialize callbacks

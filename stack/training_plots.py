@@ -1,7 +1,13 @@
 """
 training_plots.py
 -----------------
-Plot training curves for flat and hierarchical RL seeds fetched from wandb.
+Plot training curves for flat RL, hierarchical RL and Sequential HPPO seeds
+fetched from wandb.
+
+The x-axis is environment steps, read from each run's global_step (the SB3
+num_timesteps that MaskedEvalCallback logs with every evaluation), so all
+methods share the same exact axis. A run without global_step raises an error
+instead of being plotted on an approximate axis.
 
 Usage (script):
     python training_plots.py
@@ -15,12 +21,13 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from typing import List, Optional
 
-ENTITY  = "aritrabancode-university-of-amsterdam"
+ENTITY  = None  # wandb user or team; None = default entity of the logged-in API key
 PROJECT = "stack-rl"
 
 # Colors matching plots.py
 FLAT_COLOR = "#59A14F"
 HRL_COLOR  = "#F28E2B"
+SEQUENTIAL_COLOR = "#E15759"
 
 
 # ============================================================
@@ -42,18 +49,33 @@ def _ema(values: np.ndarray, alpha: float) -> np.ndarray:
     return out
 
 
+def _project_path(api: wandb.Api) -> str:
+    """"<entity>/<project>" of the runs; ENTITY=None uses the API key's default entity."""
+    return f"{ENTITY or api.default_entity}/{PROJECT}"
+
+
 def _fetch(api: wandb.Api, run_map: dict, name: str):
-    """Return (steps, rewards) numpy arrays for a single wandb run."""
+    """
+    Return (steps, rewards) numpy arrays for a single wandb run, where steps
+    are environment steps (global_step) of each evaluation.
+    """
     if name not in run_map:
         raise KeyError(
-            f"Run '{name}' not found in {ENTITY}/{PROJECT}.\n"
+            f"Run '{name}' not found in {_project_path(api)}.\n"
             f"Available runs: {sorted(run_map.keys())}"
         )
-    run  = api.run(f"{ENTITY}/{PROJECT}/{run_map[name]}")
-    hist = run.scan_history(keys=["_step", "eval/mean_reward"])
-    df   = pd.DataFrame(hist).dropna(subset=["eval/mean_reward"])
-    df   = df.sort_values("_step")
-    return df["_step"].to_numpy(dtype=float), df["eval/mean_reward"].to_numpy(dtype=float)
+    run  = api.run(f"{_project_path(api)}/{run_map[name]}")
+    # scan_history only returns rows that contain every requested key
+    hist = run.scan_history(keys=["global_step", "eval/mean_reward"])
+    df   = pd.DataFrame(hist)
+    if df.empty:
+        raise ValueError(
+            f"Run '{name}' has no eval/mean_reward logged with global_step. "
+            "Train it with run.py (wandb enabled, sync_tensorboard) so every "
+            "evaluation is logged at its environment step."
+        )
+    df   = df.dropna(subset=["eval/mean_reward"]).sort_values("global_step")
+    return df["global_step"].to_numpy(dtype=float), df["eval/mean_reward"].to_numpy(dtype=float)
 
 
 def _fetch_cached(
@@ -65,16 +87,21 @@ def _fetch_cached(
     """
     Like _fetch but saves the result to <cache_dir>/<run_name>.npz on first
     call and loads from disk on subsequent calls, avoiding repeated wandb queries.
+    Caches not marked as global_step (e.g. written by an older version of this
+    script) are re-fetched.
     """
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, name.replace("/", "_") + ".npz")
     if os.path.exists(cache_path):
-        print(f"  {name}  [from cache]")
         with np.load(cache_path) as data:
-            return data["steps"], data["rewards"]
-    print(f"  {name}  [fetching from wandb …]")
+            if "x_axis" in data and str(data["x_axis"]) == "global_step":
+                print(f"  {name}  [from cache]")
+                return data["steps"], data["rewards"]
+        print(f"  {name}  [cache not in global_step, re-fetching from wandb …]")
+    else:
+        print(f"  {name}  [fetching from wandb …]")
     steps, rewards = _fetch(api, run_map, name)
-    np.savez(cache_path, steps=steps, rewards=rewards)
+    np.savez(cache_path, steps=steps, rewards=rewards, x_axis="global_step")
     print(f"    cached → {cache_path}")
     return steps, rewards
 
@@ -117,13 +144,13 @@ def _to_common_grid(
 def plot_training_curves(
     flat_run_names: List[str],
     hrl_run_names: List[str],
+    sequential_run_names: List[str],
     env_name: str = "env",
     display_name: Optional[str] = None,
     ema_alpha: float = 0.1,
     n_points: int = 500,
     title: Optional[str] = None,
     save_path: Optional[str] = None,
-    step_correction: bool = False,
 ):
     """
     Parameters
@@ -132,6 +159,9 @@ def plot_training_curves(
         wandb run names for the 3 flat RL seeds.
     hrl_run_names : list[str]
         wandb run names for the 3 hierarchical RL seeds.
+    sequential_run_names : list[str]
+        wandb run names for the 3 Sequential HPPO seeds (run.py --sequential_hppo
+        --wandb_run_name).
     env_name : str
         Short key used for the save directory (e.g. "massive"). NOT used
         for the plot title or filename label.
@@ -151,10 +181,6 @@ def plot_training_curves(
         Base file path (no extension). Defaults to
         "results/training_curves/<env_name>/training_curves".
         Pass an empty string to skip saving.
-    step_correction : bool
-        When True, multiplies all step values on the x-axis by 197.
-        Useful when wandb logged steps are in "update" units and you
-        want to convert to environment steps.
     """
     label = display_name if display_name is not None else env_name
     if title is None:
@@ -167,12 +193,22 @@ def plot_training_curves(
 
     print("Connecting to wandb …")
     api       = wandb.Api()
-    runs_iter = api.runs(f"{ENTITY}/{PROJECT}")
+    runs_iter = list(api.runs(_project_path(api)))
     run_map   = {r.name: r.id for r in runs_iter}
+
+    # A rerun with a reused name would make run_map silently keep only one of them
+    requested = flat_run_names + hrl_run_names + sequential_run_names
+    duplicates = sorted({n for n in requested if sum(r.name == n for r in runs_iter) > 1})
+    if duplicates:
+        raise ValueError(
+            f"Run names matching more than one run in {_project_path(api)}: {duplicates}. "
+            "Rename or delete the extra runs so each name is unique."
+        )
 
     groups = [
         ("Flat RL",           flat_run_names, FLAT_COLOR),
         ("Hierarchical RL",   hrl_run_names,  HRL_COLOR),
+        ("Sequential HPPO",   sequential_run_names, SEQUENTIAL_COLOR),
     ]
 
     plt.rcParams.update({
@@ -190,6 +226,7 @@ def plot_training_curves(
     fig, ax = plt.subplots(figsize=(9, 5))
 
     # ── Fetch all runs first to compute a global step range ──
+    # x is environment steps (global_step) for every run of every group
     all_steps_lists, all_rewards_lists = [], []
     for label, run_names, color in groups:
         print(f"\nFetching {label} runs …")
@@ -201,18 +238,9 @@ def plot_training_curves(
         all_steps_lists.append(steps_list)
         all_rewards_lists.append(rewards_list)
 
-    # Global range: clip all curves to the shortest run across both groups
+    # Global range: clip all curves to the shortest run across all groups
     global_lo = max(s[0]  for sl in all_steps_lists for s in sl)
     global_hi = min(s[-1] for sl in all_steps_lists for s in sl)
-
-    # Apply step correction (multiply x-axis by 197) if requested
-    STEP_MULTIPLIER = 197
-    if step_correction:
-        all_steps_lists = [
-            [s * STEP_MULTIPLIER for s in sl] for sl in all_steps_lists
-        ]
-        global_lo *= STEP_MULTIPLIER
-        global_hi *= STEP_MULTIPLIER
 
     print(f"\nGlobal step range: {global_lo:.0f} – {global_hi:.0f}")
 
@@ -282,12 +310,17 @@ if __name__ == "__main__":
         "hrl-pointer-small-1M-s2",
         "hrl-pointer-small-1M-s3"
     ]
+    SEQUENTIAL_RUNS = [
+        "sequential-hppo-pointer-small-1M-s1",
+        "sequential-hppo-pointer-small-1M-s2",
+        "sequential-hppo-pointer-small-1M-s3"
+    ]
 
     plot_training_curves(
         flat_run_names=FLAT_RUNS,
         hrl_run_names=HRL_RUNS,
+        sequential_run_names=SEQUENTIAL_RUNS,
         env_name="small",
         display_name="Small (3x4x3)",
         ema_alpha=0.1,
-        step_correction=True
     )
