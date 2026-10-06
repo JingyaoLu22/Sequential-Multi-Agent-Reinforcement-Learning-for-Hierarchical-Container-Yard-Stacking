@@ -1,13 +1,7 @@
 """
 training_plots.py
 -----------------
-Plot training curves for flat RL, hierarchical RL and Sequential HPPO seeds
-fetched from wandb.
-
-The x-axis is environment steps, read from each run's global_step (the SB3
-num_timesteps that MaskedEvalCallback logs with every evaluation), so all
-methods share the same exact axis. A run without global_step raises an error
-instead of being plotted on an approximate axis.
+Plot training curves for flat RL, hierarchical RL and Sequential HPPO seeds fetched from wandb.
 
 Usage (script):
     python training_plots.py
@@ -21,7 +15,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from typing import List, Optional
 
-ENTITY  = None  # wandb user or team; None = default entity of the logged-in API key
+ENTITY  = None  # I don't know whether I have a wandb account. 
 PROJECT = "stack-rl"
 
 # Colors matching plots.py
@@ -55,10 +49,7 @@ def _project_path(api: wandb.Api) -> str:
 
 
 def _fetch(api: wandb.Api, run_map: dict, name: str):
-    """
-    Return (steps, rewards) numpy arrays for a single wandb run, where steps
-    are environment steps (global_step) of each evaluation.
-    """
+    """Return (steps, rewards) numpy arrays for a single wandb run, where steps are environment steps (global_step) of each evaluation."""
     if name not in run_map:
         raise KeyError(
             f"Run '{name}' not found in {_project_path(api)}.\n"

@@ -1,0 +1,28 @@
+# Ignore file for stack/Dockerfile. BuildKit uses <Dockerfile>.dockerignore next
+# to the Dockerfile instead of a .dockerignore in the build context root.
+
+# Allowlist: send only the dependency files and stack/ to the build
+*
+!pyproject.toml
+!uv.lock
+!stack/
+
+**/.DS_Store
+**/__pycache__
+**/*.pyc
+**/.ipynb_checkpoints
+**/*.log
+
+# Training outputs: mounted as volumes at run time, never baked into the image.
+# **/ also catches outputs of scripts and notebooks run from stack/.
+**/wandb/
+**/runs/
+**/outputs/
+**/results/
+**/results_extra/
+
+# Model weights: training writes them to the mounted /app/outputs instead
+**/*.zip
+stack/models/flat/
+stack/models/hierarchical/
+stack/models/sequential_hppo/

@@ -12,7 +12,22 @@ top-level directories:
 
 ## Installation
 
-Install dependencies using `pyproject.toml` and uv.
+Install dependencies using `pyproject.toml` and uv. Exact versions are pinned in `uv.lock`:
+```
+uv sync
+```
+
+Without uv (e.g. in a conda env), install the same pinned versions from `requirements.txt`, which is exported from `uv.lock`:
+```
+pip install -r requirements.txt
+```
+
+After changing dependencies (`uv add` / `uv remove`), regenerate `requirements.txt` and commit it together with `pyproject.toml` and `uv.lock`:
+```
+uv export --format requirements-txt --no-hashes --no-annotate --no-dev -o requirements.txt
+```
+
+To train Stack on a Linux GPU server with Docker, see [stack/docker.md](stack/docker.md).
 
 ## Stack
 

@@ -292,9 +292,6 @@ def evaluate_all(config_dict, flat_model_dir, hrl_model_dir, sequential_model_di
 
     Parameters
     ----------
-    sequential_model_dir : str
-        Base path containing seed1/, seed2/, seed3/ for Sequential HPPO models,
-        e.g. "stack/models/sequential_hppo/pointer/small".
     flat_seed : int
         Seed index (1–3) to use for the flat RL model.
     hrl_seed : int
