@@ -34,15 +34,27 @@ class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
     """
     Sequential HPPO policy for SequentialHPPO: a Bay actor
     (MaskableBayTransformerPolicy), a Row actor that sees only the selected
-    bay (MaskableBayTransformerPolicy with one row per action) and a
-    centralized critic (the value of MaskableTransformerPolicy), each with
-    its own encoder.
+    bay (MaskableTransformerPolicy over that bay's rows) and a centralized
+    critic (the value of MaskableTransformerPolicy), each with its own
+    encoder.
 
-    Required policy_kwargs:
+    Required policy_kwargs
+    ----------------------
+    n_stacks       : int — total yard stacks (== action_space.n)
+    n_bays         : int — number of physical (odd) bays
+    n_rows_per_bay : int — rows per bay (yard_shape[1])
 
-        n_stacks       : int  — total yard stacks (== action_space.n)
-        n_bays         : int  — number of physical (odd) bays
-        n_rows_per_bay : int  — rows per bay
+    Optional policy_kwargs (passed to all three networks)
+    -----------------------------------------------------
+    embed_dim      : int   (default 128)
+    n_heads        : int   (default 4)
+    n_layers       : int   (default 2)
+    dropout        : float (default 0.1)
+    vf_dim         : int   (default 128)
+    tanh_clipping  : float (default 10.0)
+    include_container_in_encoder : bool (default True)
+    container_start : int | None (default None) — start index of the container one-hot in each stack token
+    container_dim   : int | None (default None) — size of that one-hot; None derives both from the observation layout
     """
 
     def __init__(
@@ -107,12 +119,12 @@ class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
             n_rows_per_bay=self.n_rows_per_bay,
             **self._seq_network_kwargs,
         )
-        self.row_actor = MaskableBayTransformerPolicy(
+        # The Row actor is the stack-level pointer network over the selected bay's rows
+        self.row_actor = MaskableTransformerPolicy(
             row_observation_space,
             spaces.Discrete(self.n_rows_per_bay),
             lr_schedule,
             n_stacks=self.n_rows_per_bay,
-            n_rows_per_bay=1,
             **self._seq_network_kwargs,
         )
         self.critic = MaskableTransformerPolicy(
@@ -121,8 +133,11 @@ class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
             lr_schedule,
             **self._seq_network_kwargs,
         )
-        # One optimizer for the three networks, as in MaskableActorCriticPolicy;
-        # each SequentialHPPO step has gradients for one network only.
+        # One optimizer for the three networks, as in MaskableActorCriticPolicy. Only the
+        # actor path of bay_actor/row_actor and only predict_values of critic are used;
+        # their own optimizers are unused, all updates go through self.optimizer. Each
+        # SequentialHPPO step has gradients for one network only: _optimizer_step's
+        # zero_grad(set_to_none=True) keeps the other two at grad=None, so Adam skips them.
         self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
 
     def bay_masks(self, action_masks: torch.Tensor) -> torch.Tensor:
@@ -135,12 +150,20 @@ class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
         action_masks: torch.Tensor | None,
         bay_actions: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor | None]:
-        """The Row actor's observation (the selected bay's slice) and mask."""
-        index = torch.arange(bay_actions.shape[0], device=bay_actions.device)
-        row_obs = obs.reshape(-1, self.n_bays, obs.shape[-1] // self.n_bays)[index, bay_actions]
+        """
+        The Row actor's observation and mask: the slice of the selected bay.
+
+        obs (B, n_stacks*F), action_masks (B, n_stacks) or None,
+        bay_actions (B,) — the bay chosen by the Bay actor for each sample
+        -> row_obs (B, n_rows_per_bay*F), row_masks (B, n_rows_per_bay) or None
+        """
+        batch_index = torch.arange(bay_actions.shape[0], device=bay_actions.device)
+        obs_by_bay = obs.reshape(-1, self.n_bays, obs.shape[-1] // self.n_bays)  # (B, n_bays, n_rows_per_bay*F)
+        row_obs = obs_by_bay[batch_index, bay_actions]  # (B, n_rows_per_bay*F)
         if action_masks is None:
             return row_obs, None
-        return row_obs, action_masks.reshape(-1, self.n_bays, self.n_rows_per_bay)[index, bay_actions]
+        masks_by_bay = action_masks.reshape(-1, self.n_bays, self.n_rows_per_bay)  # (B, n_bays, n_rows_per_bay)
+        return row_obs, masks_by_bay[batch_index, bay_actions]  # (B, n_rows_per_bay)
 
     def forward(
         self,
@@ -166,7 +189,18 @@ class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
         return bay_actions * self.n_rows_per_bay + row_actions, self.critic.predict_values(obs), log_prob
 
     def predict_values(self, obs: torch.Tensor) -> torch.Tensor:
+        """V(s) from the centralized critic; the actors' own value heads are not used."""
         return self.critic.predict_values(obs)
+
+    # _build creates no mlp_extractor/action_net/value_net, so the inherited
+    # versions would fail with an AttributeError, e.g. when a checkpoint is
+    # trained further with MaskablePPO.load(...).learn(...) instead of
+    # SequentialHPPO.load(...).learn(...).
+    def evaluate_actions(self, *args, **kwargs):
+        raise NotImplementedError("Train MaskableSequentialTransformerPolicy with SequentialHPPO")
+
+    def get_distribution(self, *args, **kwargs):
+        raise NotImplementedError("Train MaskableSequentialTransformerPolicy with SequentialHPPO")
 
     def _predict(
         self,
