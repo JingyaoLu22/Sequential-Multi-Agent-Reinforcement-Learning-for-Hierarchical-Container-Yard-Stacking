@@ -70,6 +70,8 @@ def main(args):
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         lr_decay=args.lr_decay,
+        clip_range_vf=args.clip_range_vf,
+        target_kl=args.target_kl,
         run=run,
         hierarchical=args.hierarchical,
         high_level_policy_type=args.high_level_policy,
@@ -260,6 +262,18 @@ if __name__ == "__main__":
         "--lr_decay",
         action="store_true",
         help="Use linear learning rate decay to 0 over training.",
+    )
+    parser.add_argument(
+        "--clip_range_vf",
+        type=float,
+        default=None,
+        help="Clipping range for the value function update. None (default) disables value clipping.",
+    )
+    parser.add_argument(
+        "--target_kl",
+        type=float,
+        default=None,
+        help="Stop an update's epochs early when the approximate KL exceeds 1.5 * target_kl. None (default) disables early stopping.",
     )
     # hierarchical args
     parser.add_argument(

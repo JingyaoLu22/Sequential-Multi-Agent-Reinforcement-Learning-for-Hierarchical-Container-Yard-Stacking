@@ -237,6 +237,8 @@ def create_model(
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     lr_decay: bool = False,
+    clip_range_vf: float | None = None,
+    target_kl: float | None = None,
     run: Any = None,
     hierarchical_high_level: bool = False,
     n_stacks: int | None = None,
@@ -279,6 +281,8 @@ def create_model(
         gamma (float): Discount factor for future rewards.
         gae_lambda (float): GAE lambda parameter for advantage estimation.
         lr_decay (bool): Whether to use linear learning rate decay.
+        clip_range_vf (float | None): Clipping range for the value function update; None disables value clipping.
+        target_kl (float | None): Stop an update's epochs early when the approximate KL exceeds 1.5 * target_kl; None disables early stopping.
         max_grad_norm (float): Maximum gradient norm for clipping.
         run (Any): Active Wandb run object, or None to disable TensorBoard logging.
         hierarchical_high_level (bool): Whether to use a hierarchical high-level policy for sequntial training.
@@ -424,6 +428,8 @@ def create_model(
         ent_coef=ent_coef,
         vf_coef=vf_coef,
         clip_range=0.2,
+        clip_range_vf=clip_range_vf,
+        target_kl=target_kl,
         verbose=1,
         device=device,
         tensorboard_log=f"runs/{run.id}" if run is not None else None,
@@ -537,6 +543,8 @@ def train(
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     lr_decay: bool = False,
+    clip_range_vf: float | None = None,
+    target_kl: float | None = None,
     run: Any = None,
     hierarchical: bool = False,
     high_level_policy_type: str = "rule_based_grouped",
@@ -579,6 +587,8 @@ def train(
         gamma (float): Discount factor for future rewards.
         gae_lambda (float): GAE lambda parameter for advantage estimation.
         lr_decay (bool): Whether to use linear learning rate decay.
+        clip_range_vf (float | None): Clipping range for the value function update; None disables value clipping.
+        target_kl (float | None): Stop an update's epochs early when the approximate KL exceeds 1.5 * target_kl; None disables early stopping.
         run: Active W&B run object, or None to skip W&B logging.
         hierarchical (bool): Use HierarchicalLowLevelEnv wrapper for serial hierarchical training.
         high_level_policy_type (str): Fixed Policy for the high-level agent
@@ -633,6 +643,8 @@ def train(
         gamma=gamma,
         gae_lambda=gae_lambda,
         lr_decay=lr_decay,
+        clip_range_vf=clip_range_vf,
+        target_kl=target_kl,
         run=run,
         hierarchical_high_level=hierarchical_high_level,
         n_stacks=n_stacks,
