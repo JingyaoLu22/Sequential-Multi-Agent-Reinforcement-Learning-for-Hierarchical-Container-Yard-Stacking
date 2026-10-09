@@ -2,11 +2,22 @@
 Sequential HPPO algorithm for the Sequential Hierarchical Policy
 (models/sequential_hierarchical_policy.py).
 
-MaskablePPO with the sequential update of the README's "Sequential HPPO
-Update" (HAPPO-style): train() updates the critic, then the Bay actor, then
-the Row actor with the advantages M_B * A, where
-M_B = pi_bay,new / pi_bay,old. Rollouts, GAE, logging, callbacks, saving
-and loading are MaskablePPO's.
+MaskablePPO whose train() updates three networks one after another: the
+critic, then the Bay actor, then the Row actor (HAPPO-style; Kuba et al.,
+"Trust Region Policy Optimisation in Multi-Agent Reinforcement Learning",
+ICLR 2022, arXiv:2109.11251).
+
+The Row actor is updated after the Bay actor has already changed, so its
+advantages are reweighted by M_B = pi_bay,new(b|s) / pi_bay,old(b|s) at the
+bay b taken in the rollout. Since pi(b, r|s) = pi_bay(b|s) * pi_row(r|s, b),
+M_B times the Row actor's own ratio is the ratio of the joint policy, so the
+Row surrogate estimates the improvement of the joint policy rather than of
+the Row actor in isolation. M_B is computed once after the Bay update and
+kept fixed (no gradient, not clipped) during the Row update. Unlike HAPPO,
+which draws a random agent order, the order is fixed (Bay before Row),
+because the Row actor is conditioned on the chosen bay.
+
+Rollouts, GAE, logging, callbacks, saving and loading are MaskablePPO's.
 """
 
 from __future__ import annotations
@@ -15,17 +26,16 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from sb3_contrib.ppo_mask import MaskablePPO
 from stable_baselines3.common.utils import explained_variance
-
-from models.transformer_bay_policy import MaskableBayTransformerPolicy
 
 
 class SequentialHPPO(MaskablePPO):
     """
-    MaskablePPO whose train() updates the critic, then the Bay actor, then
-    the Row actor with the advantages M_B * A, where M_B = pi_bay,new / pi_bay,old
-    (HAPPO). Rollouts, GAE, logging, callbacks, saving and loading are MaskablePPO's.
+    MaskablePPO with the sequential critic -> Bay actor -> Row actor update in
+    train(); see the module docstring for why the Row actor's advantages are
+    multiplied by M_B.
     """
 
     def train(self) -> None:
@@ -39,10 +49,14 @@ class SequentialHPPO(MaskablePPO):
         self._update_learning_rate(policy.optimizer)
         # Compute current clip range
         clip_range = self.clip_range(self._current_progress_remaining)
+        # Optional: clip range for the value function
+        if self.clip_range_vf is not None:
+            clip_range_vf = self.clip_range_vf(self._current_progress_remaining)
 
         # The whole rollout, with each stack action split into its bay and row
         rollout = next(self.rollout_buffer.get())
         observations, advantages, returns = rollout.observations, rollout.advantages, rollout.returns
+        old_values = rollout.old_values
         actions = rollout.actions.long().flatten()
         action_masks = rollout.action_masks.bool()
         bay_actions = actions // policy.n_rows_per_bay
@@ -58,14 +72,26 @@ class SequentialHPPO(MaskablePPO):
             old_row_log_prob = policy.row_actor.get_distribution(row_observations, row_masks).log_prob(row_actions)
         policy.set_training_mode(True)
 
-        # 1. Critic: V(s) towards the GAE returns
+        # 1. Critic: V(s) towards the GAE returns. The critic has its own loss and
+        # parameters, so vf_coef (which weighs the value loss against the policy
+        # loss in MaskablePPO's joint loss) is not used. target_kl does not stop
+        # the critic's epochs; it applies to each actor in _train_actor.
         value_losses = []
         for _ in range(self.n_epochs):
             for idx in self._minibatch_indices(len(actions)):
                 values = policy.critic.predict_values(observations[idx]).flatten()
-                value_loss = F.mse_loss(returns[idx], values)
+                if self.clip_range_vf is None:
+                    # No clipping
+                    values_pred = values
+                else:
+                    # Clip the difference between old and new value
+                    # NOTE: this depends on the reward scaling
+                    values_pred = old_values[idx] + torch.clamp(
+                        values - old_values[idx], -clip_range_vf, clip_range_vf
+                    )
+                value_loss = F.mse_loss(returns[idx], values_pred)
                 value_losses.append(value_loss.item())
-                self._optimizer_step(policy.critic, self.vf_coef * value_loss)
+                self._optimizer_step(policy.critic, value_loss)
 
         # 2. Bay actor
         bay_logs = self._train_actor(
@@ -96,11 +122,13 @@ class SequentialHPPO(MaskablePPO):
         self.logger.record("train/explained_variance", explained_var)
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/clip_range", clip_range)
+        if self.clip_range_vf is not None:
+            self.logger.record("train/clip_range_vf", clip_range_vf)
         self.logger.record("train/bay_correction", bay_correction.mean().item())
 
     def _train_actor(
         self,
-        actor: MaskableBayTransformerPolicy,
+        actor: MaskableActorCriticPolicy,
         observations: torch.Tensor,
         actions: torch.Tensor,
         action_masks: torch.Tensor,
@@ -111,10 +139,13 @@ class SequentialHPPO(MaskablePPO):
     ) -> dict[str, float]:
         """
         MaskablePPO.train's clipped-surrogate epochs for one actor (without the
-        value loss); advantage_scale multiplies the normalized advantages.
+        value loss); advantage_scale multiplies the normalized advantages. With
+        target_kl set, this actor's epochs stop early when its approximate KL
+        exceeds 1.5 * target_kl, as in MaskablePPO.train.
         """
         entropy_losses, pg_losses, clip_fractions = [], [], []
-        for _ in range(self.n_epochs):
+        continue_training = True
+        for epoch in range(self.n_epochs):
             approx_kl_divs = []
             for idx in self._minibatch_indices(len(actions)):
                 distribution = actor.get_distribution(observations[idx], action_masks[idx])
@@ -149,9 +180,19 @@ class SequentialHPPO(MaskablePPO):
 
                 with torch.no_grad():
                     log_ratio = log_prob - old_log_prob[idx]
-                    approx_kl_divs.append(torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy())
+                    approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                    approx_kl_divs.append(approx_kl_div)
+
+                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                    continue_training = False
+                    if self.verbose >= 1:
+                        print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                    break
 
                 self._optimizer_step(actor, policy_loss + self.ent_coef * entropy_loss)
+
+            if not continue_training:
+                break
 
         return {
             "entropy_loss": np.mean(entropy_losses),
@@ -168,7 +209,9 @@ class SequentialHPPO(MaskablePPO):
 
     def _optimizer_step(self, network: torch.nn.Module, loss: torch.Tensor) -> None:
         """MaskablePPO.train's optimization step; only ``network`` has gradients."""
-        self.policy.optimizer.zero_grad()
+        # set_to_none=True is what keeps the other two networks frozen: they keep
+        # grad=None, so Adam skips them and their momentum can't move them.
+        self.policy.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         # Clip grad norm
         torch.nn.utils.clip_grad_norm_(network.parameters(), self.max_grad_norm)
