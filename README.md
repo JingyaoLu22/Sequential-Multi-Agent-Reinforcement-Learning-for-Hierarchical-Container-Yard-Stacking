@@ -42,7 +42,7 @@ uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 10000
 
 For training Sequential HPPO model (see [Sequential HPPO Update](#sequential-hppo-update)) on small environments with all constraints (40 feet and IMO) on :
 ```
-uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --sequential_hppo --save_model --save_dir ./stack/models --save_filename ppo_sequential_hppo_small_imo40ft
+uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --sequential_hppo --use_transformer --save_model --save_dir ./stack/models --save_filename ppo_sequential_hppo_small_imo40ft
 ```
 
 ### Sequential HPPO Update
