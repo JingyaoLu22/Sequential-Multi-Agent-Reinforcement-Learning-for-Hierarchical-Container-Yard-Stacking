@@ -232,7 +232,7 @@ if __name__ == "__main__":
         "--ent_coef",
         type=float,
         default=None,
-        help="Entropy coefficient for the loss. Defaults to 0.15 for joint_hierarchical, 0.3 otherwise.",
+        help="Entropy coefficient for the loss. Defaults to 0.15 for --joint_hierarchical, --hierarchical_diffobs and --sequential_hppo, 0.3 for all other algorithms.",
     )
     parser.add_argument(
         "--batch_size",
@@ -322,7 +322,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sequential_hppo",
         action="store_true",
-        help="Train separate bay and row actors with sequential (HAPPO-style) PPO updates. ent_coef defaults to 0.15, as for joint_hierarchical.",
+        help="Train separate bay and row actors with sequential (HAPPO-style) PPO updates.",
     )
     parser.add_argument(
         "--random_group_sizes",
