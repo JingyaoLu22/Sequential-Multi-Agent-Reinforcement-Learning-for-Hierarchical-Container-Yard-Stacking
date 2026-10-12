@@ -275,8 +275,10 @@ if __name__ == "__main__":
         default=None,
         help="Stop an update's epochs early when the approximate KL exceeds 1.5 * target_kl. None (default) disables early stopping.",
     )
+    # Training modes are mutually exclusive; passing none trains flat RL.
+    mode = parser.add_mutually_exclusive_group(required=False)
     # hierarchical args
-    parser.add_argument(
+    mode.add_argument(
         "--hierarchical",
         action="store_true",
         help="Use hierarchical mode: fixed high-level agent selects bay, RL learns low-level stack selection.",
@@ -289,7 +291,7 @@ if __name__ == "__main__":
         help="Policy for the high-level bay-selection agent (only used with --hierarchical).",
     )
     # hierarchical high-level training args
-    parser.add_argument(
+    mode.add_argument(
         "--hierarchical_high_level",
         action="store_true",
         help="Train the high-level bay-selection agent with a fixed low-level agent.",
@@ -308,18 +310,18 @@ if __name__ == "__main__":
         help="Path to saved MaskablePPO low-level model (required when --low_level_agent trained_model).",
     )
     # joint hierarchical args
-    parser.add_argument(
+    mode.add_argument(
         "--joint_hierarchical",
         action="store_true",
         help="Train bay and stack selection jointly with an autoregressive policy.",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--hierarchical_diffobs",
         action="store_true",
         help="Train with differentiated observations: bay head sees bay-level features, stack head sees per-bay stack features. Only learns suboptimal policy.",
     )
     # sequential HPPO args
-    parser.add_argument(
+    mode.add_argument(
         "--sequential_hppo",
         action="store_true",
         help="Train separate bay and row actors with sequential (HAPPO-style) PPO updates.",
