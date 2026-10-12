@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+.env
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Experiment tracking / logs
+wandb/
+runs/
+data1/
+
+# Evaluation outputs (plots.py, additional_plots.py, training_plots.py)
+results/
+results_extra/
+
+# Trained models: default --save_dir is ./models, and checkpoints land in
+# subfolders of stack/models/ (policy source files there stay tracked)
+/models/
+stack/models/*/
+*.pt
+*.pth
+*.ckpt
+
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
