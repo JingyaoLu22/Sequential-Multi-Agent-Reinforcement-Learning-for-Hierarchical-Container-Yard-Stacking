@@ -1,11 +1,14 @@
 """
-Sequential Hierarchical Policy for bay and stack selection.
+Separate-Observation Sequential Hierarchical Policy for bay and stack selection.
 
-Implements a hierarchical policy with three networks, each with its own
+Implements a hierarchical policy whose high-level and low-level agents
+receive separate observations (the joint hierarchical policy gives both
+heads the full observation). It has three networks, each with its own
 Transformer encoder:
-  1. Bay actor selects which bay to place the container in
-  2. Row actor selects which row within that bay; it sees only the
-     selected bay's slice of the observation
+  1. Bay actor (high level) selects which bay to place the container in;
+     it sees the full observation
+  2. Row actor (low level) selects which row within that bay; it sees only
+     the selected bay's slice of the observation
   3. Centralized critic estimates V(s) from the full observation
 
 The action space remains Discrete(n_stacks) for compatibility with
@@ -30,13 +33,13 @@ from models.transformer_policy import MaskableTransformerPolicy
 from models.transformer_bay_policy import MaskableBayTransformerPolicy
 
 
-class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
+class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy):
     """
-    Sequential HPPO policy for SequentialHPPO: a Bay actor
-    (MaskableBayTransformerPolicy), a Row actor that sees only the selected
-    bay (MaskableTransformerPolicy over that bay's rows) and a centralized
-    critic (the value of MaskableTransformerPolicy), each with its own
-    encoder.
+    Hierarchical policy with separate observations for SequentialHPPO: a
+    Bay actor on the full observation (MaskableBayTransformerPolicy), a Row
+    actor that sees only the selected bay (MaskableTransformerPolicy over
+    that bay's rows) and a centralized critic on the full observation (the
+    value of MaskableTransformerPolicy), each with its own encoder.
 
     Required policy_kwargs
     ----------------------
@@ -197,10 +200,10 @@ class MaskableSequentialTransformerPolicy(MaskableActorCriticPolicy):
     # trained further with MaskablePPO.load(...).learn(...) instead of
     # SequentialHPPO.load(...).learn(...).
     def evaluate_actions(self, *args, **kwargs):
-        raise NotImplementedError("Train MaskableSequentialTransformerPolicy with SequentialHPPO")
+        raise NotImplementedError("Train MaskableSeparateObsSequentialHierarchicalPolicy with SequentialHPPO")
 
     def get_distribution(self, *args, **kwargs):
-        raise NotImplementedError("Train MaskableSequentialTransformerPolicy with SequentialHPPO")
+        raise NotImplementedError("Train MaskableSeparateObsSequentialHierarchicalPolicy with SequentialHPPO")
 
     def _predict(
         self,

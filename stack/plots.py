@@ -11,7 +11,7 @@ from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.common.wrappers import ActionMasker
 from utils import mask_fn
 from models.joint_hierarchical_policy import MaskableJointTransformerPolicy
-from models.sequential_hierarchical_policy import MaskableSequentialTransformerPolicy
+from models.separate_obs_sequential_hierarchical_policy import MaskableSeparateObsSequentialHierarchicalPolicy
 
 
 # ============================================================
@@ -258,7 +258,7 @@ def evaluate(config_dict, flat_model_dir, hrl_model_dir, sequential_model_dir,
             print(f"{'=' * 70}")
             model = MaskablePPO.load(
                 model_path,
-                custom_objects={"policy_class": MaskableSequentialTransformerPolicy},
+                custom_objects={"policy_class": MaskableSeparateObsSequentialHierarchicalPolicy},
             )
             print(f"  Model loaded successfully.")
             rewards = _evaluate_rl_model(rl_config, model, num_seeds, max_steps)

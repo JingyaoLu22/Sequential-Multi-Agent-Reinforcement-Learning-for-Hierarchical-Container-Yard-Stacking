@@ -37,7 +37,7 @@ from models.joint_hierarchical_policy import (
     MaskableJointTransformerPolicy,
 )
 from models.joint_diffobs_policy import MaskableDiffObsJointTransformerPolicy
-from models.sequential_hierarchical_policy import MaskableSequentialTransformerPolicy
+from models.separate_obs_sequential_hierarchical_policy import MaskableSeparateObsSequentialHierarchicalPolicy
 from models.sequential_hppo import SequentialHPPO
 
 
@@ -336,8 +336,9 @@ def create_model(
         )
     elif sequential_hppo:
         # Sequential HPPO: separate bay actor, row actor and critic, updated one after another by SequentialHPPO.
+        # High level and low level policies receive separate observations: the row actor sees only the selected bay.
         n_bays = n_stacks // n_rows_per_bay
-        policy = MaskableSequentialTransformerPolicy
+        policy = MaskableSeparateObsSequentialHierarchicalPolicy
         policy_kwargs = dict(
             n_stacks=n_stacks,
             n_bays=n_bays,

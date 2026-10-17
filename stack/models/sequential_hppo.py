@@ -1,6 +1,6 @@
 """
-Sequential HPPO algorithm for the Sequential Hierarchical Policy
-(models/sequential_hierarchical_policy.py).
+Sequential HPPO algorithm for the Separate-Observation Sequential Hierarchical
+Policy (models/separate_obs_sequential_hierarchical_policy.py).
 
 MaskablePPO whose train() updates three networks one after another: the
 critic, then the Bay actor, then the Row actor (HAPPO-style; Kuba et al.,
