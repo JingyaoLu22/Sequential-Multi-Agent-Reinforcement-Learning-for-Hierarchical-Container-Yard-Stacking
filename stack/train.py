@@ -247,6 +247,7 @@ def create_model(
     hierarchical_diffobs: bool = False,
     group_num: int | None = None,
     sequential_hppo: bool = False,
+    share_bay_critic_encoder: bool = False,
 ) -> MaskablePPO:
     """
     Instantiate a MaskablePPO agent for the stowage stack environment.
@@ -292,6 +293,8 @@ def create_model(
         hierarchical_diffobs (bool): Whether to use a differentiated observation hierarchical policy (currently not working).
         group_num (int | None): Number of container groups in the yard.
         sequential_hppo (bool): Whether to use Sequential HPPO (separate bay actor, row actor and critic).
+        share_bay_critic_encoder (bool): With sequential_hppo, use the bay actor's value head as the critic
+            (one encoder for both), updated together with the bay actor before the row actor.
     Returns:
         Model : MaskablePPO agent model ready for training.
     """
@@ -312,6 +315,9 @@ def create_model(
     # Default entropy coefficient
     if ent_coef is None:
         ent_coef = 0.15 if (joint_hierarchical or hierarchical_diffobs or sequential_hppo) else 0.3
+
+    if share_bay_critic_encoder and not sequential_hppo:
+        raise ValueError("share_bay_critic_encoder=True requires sequential_hppo=True")
 
     
     if hierarchical_diffobs:
@@ -337,6 +343,7 @@ def create_model(
     elif sequential_hppo:
         # Sequential HPPO: separate bay actor, row actor and critic, updated one after another by SequentialHPPO.
         # High level and low level policies receive separate observations: the row actor sees only the selected bay.
+        # With share_bay_critic_encoder the critic is the bay actor's value head, updated together with the bay actor.
         n_bays = n_stacks // n_rows_per_bay
         policy = MaskableSeparateObsSequentialHierarchicalPolicy
         policy_kwargs = dict(
@@ -348,6 +355,7 @@ def create_model(
             n_layers=n_layers,
             vf_dim=vf_dim,
             tanh_clipping=tanh_clipping,
+            share_bay_critic_encoder=share_bay_critic_encoder,
             **_container_kwargs,
         )
     elif joint_hierarchical:
@@ -555,6 +563,7 @@ def train(
     joint_hierarchical: bool = False,
     hierarchical_diffobs: bool = False,
     sequential_hppo: bool = False,
+    share_bay_critic_encoder: bool = False,
 ) -> None:
     """
     Training function.
@@ -599,6 +608,8 @@ def train(
         joint_hierarchical (bool): Used for joint hierarchical policy for bay-level and stack-level selection.
         hierarchical_diffobs (bool): Used for differentiated observation hierarchical policy (currently not working).
         sequential_hppo (bool): Train separate bay and row actors with sequential (HAPPO-style) PPO updates.
+        share_bay_critic_encoder (bool): With sequential_hppo, the critic is the bay actor's value head
+            (one encoder for both), updated together with the bay actor before the row actor.
     """
     seed = config.get("seed", None)
 
@@ -654,6 +665,7 @@ def train(
         hierarchical_diffobs=hierarchical_diffobs,
         group_num=config.get("group_num", 3),
         sequential_hppo=sequential_hppo,
+        share_bay_critic_encoder=share_bay_critic_encoder,
     )
 
     # Initialize callbacks

@@ -17,6 +17,12 @@ StackEnv and MaskablePPO: stack action = bay * n_rows_per_bay + row.
 Unlike the joint hierarchical policy, which is trained by MaskablePPO with
 a single loss on log p(bay) + log p(stack | bay), the three networks are
 updated one after another by SequentialHPPO (models/sequential_hppo.py).
+
+With share_bay_critic_encoder=True there is no separate critic network:
+V(s) is the Bay actor's own value head, on the Bay actor's encoder, so the
+full observation is encoded once instead of twice. SequentialHPPO then
+updates the Bay actor and the critic together in one loss, and the Row
+actor after them.
 """
 
 from __future__ import annotations
@@ -39,7 +45,9 @@ class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy)
     Bay actor on the full observation (MaskableBayTransformerPolicy), a Row
     actor that sees only the selected bay (MaskableTransformerPolicy over
     that bay's rows) and a centralized critic on the full observation (the
-    value of MaskableTransformerPolicy), each with its own encoder.
+    value of MaskableTransformerPolicy), each with its own encoder. With
+    share_bay_critic_encoder=True the critic is the Bay actor's value head
+    (the value of MaskableBayTransformerPolicy) instead.
 
     Required policy_kwargs
     ----------------------
@@ -58,6 +66,11 @@ class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy)
     include_container_in_encoder : bool (default True)
     container_start : int | None (default None) — start index of the container one-hot in each stack token
     container_dim   : int | None (default None) — size of that one-hot; None derives both from the observation layout
+
+    Other optional policy_kwargs
+    ----------------------------
+    share_bay_critic_encoder : bool (default False) — the critic is the Bay actor's
+        value head, so the Bay actor and the critic share one encoder
     """
 
     def __init__(
@@ -77,6 +90,7 @@ class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy)
         include_container_in_encoder: bool = True,
         container_start: int | None = None,
         container_dim: int | None = None,
+        share_bay_critic_encoder: bool = False,
         **kwargs,
     ) -> None:
         assert n_stacks is not None, "n_stacks required"
@@ -86,6 +100,7 @@ class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy)
         self.n_stacks = n_stacks
         self.n_bays = n_bays
         self.n_rows_per_bay = n_rows_per_bay
+        self.share_bay_critic_encoder = share_bay_critic_encoder
         self._seq_network_kwargs = dict(
             embed_dim=embed_dim,
             n_heads=n_heads,
@@ -130,17 +145,20 @@ class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy)
             n_stacks=self.n_rows_per_bay,
             **self._seq_network_kwargs,
         )
-        self.critic = MaskableTransformerPolicy(
-            self.observation_space,
-            self.action_space,
-            lr_schedule,
-            **self._seq_network_kwargs,
-        )
-        # One optimizer for the three networks, as in MaskableActorCriticPolicy. Only the
-        # actor path of bay_actor/row_actor and only predict_values of critic are used;
+        # With share_bay_critic_encoder, V(s) is the Bay actor's value head instead
+        if not self.share_bay_critic_encoder:
+            self.critic = MaskableTransformerPolicy(
+                self.observation_space,
+                self.action_space,
+                lr_schedule,
+                **self._seq_network_kwargs,
+            )
+        # One optimizer for all networks, as in MaskableActorCriticPolicy. Only the
+        # actor path of bay_actor/row_actor and only predict_values of critic are used
+        # (with share_bay_critic_encoder, both paths of bay_actor and no critic);
         # their own optimizers are unused, all updates go through self.optimizer. Each
         # SequentialHPPO step has gradients for one network only: _optimizer_step's
-        # zero_grad(set_to_none=True) keeps the other two at grad=None, so Adam skips them.
+        # zero_grad(set_to_none=True) keeps the others at grad=None, so Adam skips them.
         self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
 
     def bay_masks(self, action_masks: torch.Tensor) -> torch.Tensor:
@@ -176,23 +194,35 @@ class MaskableSeparateObsSequentialHierarchicalPolicy(MaskableActorCriticPolicy)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Bay actor -> Row actor on the selected bay -> stack action; the value
-        is the critic's and the log-probability is log pi_bay + log pi_row.
+        is predict_values' and the log-probability is log pi_bay + log pi_row.
         """
         if action_masks is not None:
             action_masks = torch.as_tensor(action_masks, dtype=torch.bool, device=obs.device).reshape(-1, self.n_stacks)
+        bay_masks = None if action_masks is None else self.bay_masks(action_masks)
 
-        bay_dist = self.bay_actor.get_distribution(obs, None if action_masks is None else self.bay_masks(action_masks))
-        bay_actions = bay_dist.get_actions(deterministic=deterministic)
+        if self.share_bay_critic_encoder:
+            # One pass of the shared encoder gives both the bay action and V(s)
+            bay_actions, values, bay_log_prob = self.bay_actor(obs, deterministic=deterministic, action_masks=bay_masks)
+        else:
+            bay_dist = self.bay_actor.get_distribution(obs, bay_masks)
+            bay_actions = bay_dist.get_actions(deterministic=deterministic)
+            bay_log_prob = bay_dist.log_prob(bay_actions)
+            values = self.critic.predict_values(obs)
 
         row_obs, row_masks = self.row_inputs(obs, action_masks, bay_actions)
         row_dist = self.row_actor.get_distribution(row_obs, row_masks)
         row_actions = row_dist.get_actions(deterministic=deterministic)
 
-        log_prob = bay_dist.log_prob(bay_actions) + row_dist.log_prob(row_actions)
-        return bay_actions * self.n_rows_per_bay + row_actions, self.critic.predict_values(obs), log_prob
+        log_prob = bay_log_prob + row_dist.log_prob(row_actions)
+        return bay_actions * self.n_rows_per_bay + row_actions, values, log_prob
 
     def predict_values(self, obs: torch.Tensor) -> torch.Tensor:
-        """V(s) from the centralized critic; the actors' own value heads are not used."""
+        """
+        V(s) from the centralized critic, or with share_bay_critic_encoder from
+        the Bay actor's value head; the Row actor's value head is not used.
+        """
+        if self.share_bay_critic_encoder:
+            return self.bay_actor.predict_values(obs)
         return self.critic.predict_values(obs)
 
     # _build creates no mlp_extractor/action_net/value_net, so the inherited

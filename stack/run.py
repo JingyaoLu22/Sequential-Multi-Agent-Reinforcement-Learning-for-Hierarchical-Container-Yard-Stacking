@@ -81,6 +81,7 @@ def main(args):
         joint_hierarchical=args.joint_hierarchical,
         hierarchical_diffobs=args.hierarchical_diffobs,
         sequential_hppo=args.sequential_hppo,
+        share_bay_critic_encoder=args.share_bay_critic_encoder,
     )
 
     if run is not None:
@@ -325,6 +326,11 @@ if __name__ == "__main__":
         "--sequential_hppo",
         action="store_true",
         help="Train separate bay and row actors with sequential (HAPPO-style) PPO updates.",
+    )
+    parser.add_argument(
+        "--share_bay_critic_encoder",
+        action="store_true",
+        help="Use the bay actor's value head as the critic, so they share one encoder and are updated together (value loss weighted by --vf_coef) before the row actor (only used with --sequential_hppo).",
     )
     parser.add_argument(
         "--random_group_sizes",

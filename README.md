@@ -45,6 +45,11 @@ For training Sequential HPPO model (see [Sequential HPPO Update](#sequential-hpp
 uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --sequential_hppo --use_transformer --save_model --save_dir ./stack/models --save_filename ppo_sequential_hppo_small_imo40ft
 ```
 
+Add `--share_bay_critic_encoder` to use the bay actor's value head as the critic: the bay actor and the critic then share one encoder and are updated together in one loss (value loss weighted by `--vf_coef`), before the row actor:
+```
+uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 100000 --sequential_hppo --share_bay_critic_encoder --use_transformer --save_model --save_dir ./stack/models --save_filename ppo_sequential_hppo_shared_small_imo40ft
+```
+
 ### Sequential HPPO Update
 
 ![Sequential HPPO update](stack/assets/sequential_hppo_update.png)
@@ -61,7 +66,7 @@ uv run stack/run.py --size small_with_margin --eval_freq 25000 --timesteps 10000
 | `stack/models/transformer_policy.py` | Transformer encoder and Pointer Network decoder implementation.|
 | `stack/models/joint_hierarchical_policy.py` | Code for Hierarchical RL policy |
 | `stack/models/separate_obs_sequential_hierarchical_policy.py` | Code for Sequential HPPO policy with separate observations (bay actor on the full observation, row actor on the selected bay only, centralized critic) |
-| `stack/models/sequential_hppo.py` | Sequential HPPO algorithm: MaskablePPO with the sequential critic → bay actor → row actor update |
+| `stack/models/sequential_hppo.py` | Sequential HPPO algorithm: MaskablePPO with the sequential critic → bay actor → row actor update (bay actor + critic → row actor with `--share_bay_critic_encoder`) |
 
 ## Stow
 
